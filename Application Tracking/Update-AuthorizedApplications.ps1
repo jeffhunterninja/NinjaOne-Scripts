@@ -1,3 +1,70 @@
+<#
+.SYNOPSIS
+    This script updates authorized software lists for organizations and devices in NinjaOne using its API.
+
+.DESCRIPTION
+    This script interacts with the NinjaOne API to:
+    - Authorize all installed software for organizations.
+    - Add or remove specific software for selected organizations or devices.
+    - Automate updates to custom fields in NinjaOne based on input parameters or environment variables.
+
+.PARAMETER Option1
+    [string] Comma-separated list of organizations or "ALL" to authorize all current installed software.
+
+.PARAMETER Option2
+    [bool] True/False flag to enable updating organizations with the current software inventory.
+
+.PARAMETER Option3
+    [string] Comma-separated list of organizations or "ALL" where software should be added.
+
+.PARAMETER Option4
+    [string] Comma-separated list of software to add for organizations specified in Option3.
+
+.PARAMETER Option5
+    [string] Comma-separated list of organizations or "ALL" where software should be removed.
+
+.PARAMETER Option6
+    [string] Comma-separated list of software to remove for organizations specified in Option5.
+
+.PARAMETER Option7
+    [string] Comma-separated list of devices where software should be added.
+
+.PARAMETER Option8
+    [string] Comma-separated list of software to add for devices specified in Option7.
+
+.PARAMETER Option9
+    [string] Comma-separated list of devices where software should be removed.
+
+.PARAMETER Option10
+    [string] Comma-separated list of software to remove for devices specified in Option9.
+
+.EXAMPLE
+    # Update all organizations with the current software inventory
+    .\ScriptName.ps1 -Option1 "ALL" -Option2 $true
+
+.EXAMPLE
+    # Add SoftwareA and SoftwareB to Org1 and Org2
+    .\ScriptName.ps1 -Option3 "Org1,Org2" -Option4 "SoftwareA,SoftwareB"
+
+.EXAMPLE
+    # Remove SoftwareX and SoftwareY from Device1 and Device2
+    .\ScriptName.ps1 -Option9 "Device1,Device2" -Option10 "SoftwareX,SoftwareY"
+
+.INPUTS
+    - Input parameters can be passed directly to the script.
+    - For use within NinjaOne, Script Variables are recommended for ease of use in relaying parameter values.
+
+.OUTPUTS
+    Success or error messages for each operation.
+
+.NOTES
+    - PowerShell Version: 5.1 or later.
+    - Rate Limiting: The script includes small delays to avoid exceeding NinjaOne's API rate limits.
+    - API Credentials: NinjaOne Instance, Client ID, and Client Secret must be available for authentication.
+
+#>
+
+
 param (
     [string]$Option1,  # comma-separated string of organizations or "ALL" that should automatically authorize all software currently installed
     [bool]$Option2,  # True/False parameter for execution execution of targets (specified in Option1)

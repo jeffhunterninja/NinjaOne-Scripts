@@ -1,3 +1,47 @@
+<#
+.SYNOPSIS
+    Compares installed applications on a device to the list of authorized applications in NinjaOne.
+
+.DESCRIPTION
+    This script checks installed software applications against authorized applications defined 
+    at the organization and device levels within NinjaOne. The comparison mode can be "Exact", 
+    "CaseInsensitive", or "Partial". Discrepant applications (unauthorized) are reported and 
+    updated as a NinjaOne custom property.
+
+.PARAMETER jsonFilePath
+    [string] The path to the JSON file containing software inventory data.  
+    Default: C:\ProgramData\NinjaRMMAgent\jsonoutput\jsonoutput-agent.txt
+
+.PARAMETER matchMode
+    [string] The matching mode for application comparison.  
+    Options:
+        - "Exact"          : Matches application names exactly.
+        - "CaseInsensitive": Matches names regardless of case.
+        - "Partial"        : Matches applications partially (substring match).
+
+.INPUTS
+    - The script reads from a JSON file for software inventory.
+    - Environment variable `matchingCriteria` determines the comparison mode.
+
+.OUTPUTS
+    - Displays discrepant (unauthorized) applications in the console.
+    - Updates the NinjaOne property `unauthorizedApplications` with a list of discrepant software.
+    - Outputs "No discrepancies found" if all applications are authorized.
+
+.EXAMPLE
+    # Run the script with default path and matching criteria set via environment variable
+    .\ScriptName.ps1
+
+.NOTES
+    - PowerShell Version: 5.1 or later.
+    - Required: NinjaOne Agent must export JSON software inventory data.
+    - NinjaOne custom property `unauthorizedApplications` is updated if discrepancies are found.
+    - Errors if the JSON file is missing or invalid.
+
+#>
+
+
+
 # Path to the JSON file
 $jsonFilePath = "C:\ProgramData\NinjaRMMAgent\jsonoutput\jsonoutput-agent.txt"
 

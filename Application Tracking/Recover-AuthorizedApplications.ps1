@@ -1,3 +1,66 @@
+<#
+.SYNOPSIS
+    Backs up or restores authorized software lists for organizations and devices in NinjaOne.
+
+.DESCRIPTION
+    This script provides two primary actions: 
+    1. **Backup**: Retrieves and saves the authorized software lists for organizations and devices to a JSON file.
+    2. **Restore**: Restores authorized software lists for organizations or devices from a backup JSON file.
+
+    The script supports filtering targets for restoration (organizations or devices) and selecting the most recent backup file automatically.
+
+.PARAMETER Action
+    [string] Specifies the action to perform.
+    Valid values: "Backup" or "Restore".
+
+.PARAMETER BackupFile
+    [string] The path to the backup JSON file to be used for restoration. 
+    Required when performing a Restore action.
+
+.PARAMETER BackupDirectory
+    [string] The directory containing backup files. 
+    If no BackupFile is specified, the script will automatically select the most recent backup file.
+
+.PARAMETER TargetType
+    [string] The type of targets to restore.
+    Valid values: "All", "Organizations", or "Devices".
+
+.PARAMETER RestoreTargets
+    [string] A comma-separated list of specific targets to restore (organization names or device names). 
+    If TargetType is "All", this parameter is ignored.
+
+.EXAMPLE
+    # Perform a backup of all authorized software lists
+    .\ScriptName.ps1 -Action Backup
+
+.EXAMPLE
+    # Restore authorized software lists for all organizations from the most recent backup
+    .\ScriptName.ps1 -Action Restore -BackupDirectory "C:\Backups" -TargetType Organizations
+
+.EXAMPLE
+    # Restore authorized software for specific devices from a specific backup file
+    .\ScriptName.ps1 -Action Restore -BackupFile "C:\Backups\Backup_20240923_120000.json" `
+                     -TargetType Devices -RestoreTargets "Device1,Device2"
+
+.EXAMPLE
+    # Automatically find the most recent backup and restore software lists for all devices
+    .\ScriptName.ps1 -Action Restore -BackupDirectory "C:\Backups" -TargetType Devices
+
+.INPUTS
+    Environment variables:
+        - $env:action          : Specifies the action ("Backup" or "Restore").
+        - $env:backupFile      : Path to the backup file for restoration.
+
+.OUTPUTS
+    - For **Backup**: A JSON file containing authorized software lists is saved to the specified or default location.
+    - For **Restore**: Updates authorized software lists in NinjaOne and outputs success/failure messages.
+
+.NOTES
+    - PowerShell Version: 5.1 or later.
+    - The script requires API credentials for NinjaOne.
+
+#>
+
 param(
     # Action Parameter to Determine Backup or Restore
     [Parameter(Mandatory = $false, HelpMessage = "Specify the action to perform: Backup or Restore.")]
@@ -18,7 +81,7 @@ param(
 )
 if ($env:action -and $env:action -notlike "null") { $Action = $env:action }
 if ($env:backupFile -and $env:backupFile -notlike "null") { $BackupFile = $env:backupFile }
-$BackupDirectory = "C:\"
+if ($env:backupDirectory -and $env:backupDirectory -notlike "null") { $BackupDirectory = $env:backupDirectory }
 $TargetType = "Devices"
 $RestoreTargets = "SE-Win10Q"
 
