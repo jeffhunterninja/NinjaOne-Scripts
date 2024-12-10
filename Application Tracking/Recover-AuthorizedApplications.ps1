@@ -82,9 +82,8 @@ param(
 if ($env:action -and $env:action -notlike "null") { $Action = $env:action }
 if ($env:backupFile -and $env:backupFile -notlike "null") { $BackupFile = $env:backupFile }
 if ($env:backupDirectory -and $env:backupDirectory -notlike "null") { $BackupDirectory = $env:backupDirectory }
-$TargetType = "Devices"
-$RestoreTargets = "SE-Win10Q"
-
+if ($env:targetType -and $env:targetType -notlike "null") { $TargetType = $env:targetType }
+if ($env:restoreTargets -and $env:restoreTargets -notlike "null") { $RestoreTargets = $env:restoreTargets }
 
 try {
     # Configuration
