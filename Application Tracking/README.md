@@ -8,6 +8,8 @@ This may not be a feasible workflow depending on your environment. For example:
 - Users used to having install rights may not react positively to having them withdrawn
 - However, if users are otherwise locked down already, this could be a useful tool to identify unexpected application installations.
 
+**Only Windows devices are supported today**
+
 > **Recommendation:** Use this process primarily for tracking application usage across endpoints as a **periodic report**, rather than for security/operational processes requiring immediate responses.
 
 ---
