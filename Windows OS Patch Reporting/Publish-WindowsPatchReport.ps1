@@ -214,39 +214,39 @@ $filteredActivities = $allActivities.activities | Where-Object {
 
 # Now $filteredActivities contains only the activities that occurred on or after the first day of the current month
 
-    # Convert the JSON response to activities array if needed
-    if ($filteredActivities) {
-        $userActivities = $filteredActivities
+# Convert Unix timestamps (in seconds) or DateTime to readable DateTime
+$userActivities = $filteredActivities | ForEach-Object {
+    $activity = $_
+    $unixTime = $activity.activityTime
+    $activityTime = $null
+
+    # Safely handle the activityTime conversion
+    if ($unixTime -is [int64]) {
+        # If it's a 64-bit integer, convert directly
+        $activityTime = [System.DateTimeOffset]::FromUnixTimeSeconds($unixTime).DateTime
+    }
+    elseif ($unixTime -is [double]) {
+        # If it's a double (floating point), convert to a long (64-bit integer) by rounding or flooring
+        $roundedUnixTime = [long][math]::Floor($unixTime)
+        $activityTime = [System.DateTimeOffset]::FromUnixTimeSeconds($roundedUnixTime).DateTime
+    }
+    elseif ($unixTime -is [datetime]) {
+        # If already a DateTime, no conversion needed
+        $activityTime = $unixTime
+    }
+    else {
+        # If it's not an expected type, log an error
+        Write-Error "Invalid activity time format encountered: $unixTime"
     }
 
-    # Convert Unix timestamps (in seconds) or already formatted DateTime to readable DateTime
-    $userActivities = $filteredActivities | ForEach-Object {
-        $activity = $_
-        # Safely handle the activityTime conversion
-        $unixTime = $activity.activityTime
-
-        if ($unixTime -is [int64]) {
-            # Convert Unix time (seconds) to DateTime if it's an integer
-            $activityTime = [System.DateTimeOffset]::FromUnixTimeSeconds($unixTime).DateTime
-        }
-        elseif ($unixTime -is [datetime]) {
-            # If already a DateTime object, use it directly
-            $activityTime = $unixTime
-        }
-        else {
-            Write-Error "Invalid activity time format encountered: $unixTime"
-            $activityTime = $null
-        }
-
-        # Update the activity's time field with the converted DateTime
-        if ($activityTime) {
-            $activity.activityTime = $activityTime
-        }
-
-        # Return the updated activity object
-        $activity
+    # Update the activity's time field with the converted DateTime if valid
+    if ($activityTime) {
+        $activity.activityTime = $activityTime
     }
 
+    # Return the updated activity object
+    $activity
+  }
 } catch {
     Write-Error "Failed to retrieve activities. Error: $_"
     exit
