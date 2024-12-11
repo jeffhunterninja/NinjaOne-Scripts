@@ -17,7 +17,9 @@ param (
     [Parameter()]
     [Switch]$CreateDocument = [System.Convert]::ToBoolean($env:sendToDocumentation),
     [Parameter()]
-    [Switch]$CreateGlobalKB = [System.Convert]::ToBoolean($env:globalOverview)
+    [Switch]$CreateGlobalKB = [System.Convert]::ToBoolean($env:globalOverview),
+    [Parameter()]
+    [string]$ReportMonth # Optional parameter (e.g., "December 2024")
 )
 
 # Check for required PowerShell version (7+)
@@ -58,7 +60,6 @@ catch {
     exit
 }
 
-
 # Your NinjaRMM credentials - these should be stored in secure NinjaOne custom fields
 $NinjaOneInstance = Ninja-Property-Get ninjaoneInstance
 $NinjaOneClientId = Ninja-Property-Get ninjaoneClientId
@@ -78,25 +79,40 @@ catch {
     exit
 }
 if ($CreateKB -or $CreateDocument -or $CreateGlobalKB) {
-# Calculating the date range for the previous month
-$CurrentDate = Get-Date
-$FirstDayOfCurrentMonth = Get-Date -Year $CurrentDate.Year -Month $CurrentDate.Month -Day 1
+# Define the month and year for the report
+if ($ReportMonth) {
+    try {
+        # Parse input as "MMMM yyyy" (e.g., "December 2024")
+        $ParsedDate = [datetime]::ParseExact($ReportMonth, "MMMM yyyy", [cultureinfo]::InvariantCulture)
 
-# Get the current date
-$currentDate = Get-Date
+        # Set the first and last day of the specified month
+        $FirstDayOfMonth = Get-Date -Year $ParsedDate.Year -Month $ParsedDate.Month -Day 1
+        $LastDayOfMonth = $FirstDayOfMonth.AddMonths(1).AddDays(-1)
+        $currentMonth = $FirstDayOfMonth.ToString("MMMM")  # Get full month name (e.g., December)
+        $currentYear = $FirstDayOfMonth.ToString("yyyy")   # Get year (e.g., 2024)
+    }
+    catch {
+        Write-Error "Invalid ReportMonth format. Use 'MMMM yyyy' (e.g., 'December 2024')."
+        exit 1
+    }
+}
+else {
+    # Default to the current month and year
+    $FirstDayOfMonth = Get-Date -Day 1
+    $LastDayOfMonth = (Get-Date -Day 1).AddMonths(1).AddDays(-1)
+    # Define the current month and year
+    $currentMonth = (Get-Date).ToString("MMMM")
+    $currentYear = (Get-Date).Year.ToString()
+}
 
-# Get the first day of the next month
-$firstDayNextMonth = [datetime]::new($currentDate.Year, $currentDate.Month, 1).AddMonths(1)
+# Formatting for API query parameters
+$FirstDayString = $FirstDayOfMonth.ToString('yyyyMMdd')
+$LastDayString = $LastDayOfMonth.ToString('yyyyMMdd')
 
-# Subtract one day to get the last day of the current month
-$lastDayOfMonth = $firstDayNextMonth.AddDays(-1)
+# Display the date range being used
+Write-Output "Generating report for: $($FirstDayOfMonth.ToString('MMMM yyyy'))"
+Write-Output "Report Date Range: $($FirstDayOfMonth.ToShortDateString()) - $($LastDayOfMonth.ToShortDateString())"
 
-# Output the last day of the month
-$lastDayOfMonth
-
-# Formatting dates for API query parameters
-$LastDayString = $lastDayOfMonth.ToString('yyyyMMdd')
-$FirstDayString = $FirstDayOfCurrentMonth.ToString('yyyyMMdd')
 
 # Collect user activities
 $patchScans = @()
@@ -203,19 +219,32 @@ $filteredActivities = $allActivities.activities | Where-Object {
         $userActivities = $filteredActivities
     }
 
-    # Convert Unix timestamps (in seconds) to DateTime
-    $userActivities = $userActivities | ForEach-Object {
+    # Convert Unix timestamps (in seconds) or already formatted DateTime to readable DateTime
+    $userActivities = $filteredActivities | ForEach-Object {
         $activity = $_
-        # Extract the Unix timestamp (in seconds)
+        # Safely handle the activityTime conversion
         $unixTime = $activity.activityTime
-        # Convert Unix time (seconds) to DateTime
-        $activityTime = [System.DateTimeOffset]::FromUnixTimeSeconds($unixTime).DateTime
+
+        if ($unixTime -is [int64]) {
+            # Convert Unix time (seconds) to DateTime if it's an integer
+            $activityTime = [System.DateTimeOffset]::FromUnixTimeSeconds($unixTime).DateTime
+        }
+        elseif ($unixTime -is [datetime]) {
+            # If already a DateTime object, use it directly
+            $activityTime = $unixTime
+        }
+        else {
+            Write-Error "Invalid activity time format encountered: $unixTime"
+            $activityTime = $null
+        }
+
         # Update the activity's time field with the converted DateTime
-        $activity.activityTime = $activityTime
+        if ($activityTime) {
+            $activity.activityTime = $activityTime
+        }
+
         # Return the updated activity object
         $activity
-
-
     }
 
 } catch {
@@ -389,9 +418,6 @@ $PatchReportTemplate = [PSCustomObject]@{
     Write-Output "Skipping organizational document and KB creation"
 }
 
-# Define the current month and year
-$currentMonth = (Get-Date).ToString("MMMM")
-$currentYear = (Get-Date).Year.ToString()
 
 if ($CreateKB -or $CreateDocument) {
     # Create or retrieve the document template
@@ -632,6 +658,10 @@ if ($CreateGlobalKB) {
         # Add properties to the patchinstall
         $patchinstall | Add-Member -MemberType NoteProperty -Name "DeviceName" -Value $device.systemName -Force
         $patchinstall | Add-Member -MemberType NoteProperty -Name "OrganizationName" -Value $organization.name -Force
+
+        # Convert Unix timestamps to readable format
+        $patchinstall.installedAt = ([DateTimeOffset]::FromUnixTimeSeconds($patchinstall.installedAt).DateTime).ToString()
+        $patchinstall.timestamp = ([DateTimeOffset]::FromUnixTimeSeconds($patchinstall.timestamp).DateTime).ToString()
 
         # Collect the necessary properties into a custom object
         $AggregatedPatchInstall = [PSCustomObject]@{
