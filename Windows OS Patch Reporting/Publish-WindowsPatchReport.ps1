@@ -19,7 +19,7 @@ param (
     [Parameter()]
     [Switch]$CreateGlobalKB = [System.Convert]::ToBoolean($env:globalOverview),
     [Parameter()]
-    [string]$ReportMonth # Optional parameter (e.g., "December 2024")
+    [string]$ReportMonth = [System.Convert]::ToString($env:reportMonth) # Optional parameter (e.g., "December 2024")
 )
 
 # Check for required PowerShell version (7+)
