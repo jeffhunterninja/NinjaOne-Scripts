@@ -78,6 +78,25 @@ catch {
     Write-Error "Failed to connect to NinjaOne API. Error: $_"
     exit
 }
+
+function Convert-ActivityTime {
+    param([Parameter(Mandatory)]$TimeValue)
+
+    if ($TimeValue -is [datetime]) {
+        return $TimeValue
+    } elseif ($TimeValue -is [int64]) {
+        return [System.DateTimeOffset]::FromUnixTimeSeconds($TimeValue).DateTime
+    } elseif ($TimeValue -is [double]) {
+        $roundedUnixTime = [long][math]::Floor($TimeValue)
+        return [System.DateTimeOffset]::FromUnixTimeSeconds($roundedUnixTime).DateTime
+    } else {
+        # If needed, try parsing as a string or log an error
+        # return $TimeValue as-is if no known conversion is possible
+        return $TimeValue
+    }
+}
+
+
 if ($CreateKB -or $CreateDocument -or $CreateGlobalKB) {
 # Define the month and year for the report
 if ($ReportMonth) {
@@ -216,37 +235,9 @@ $filteredActivities = $allActivities.activities | Where-Object {
 
 # Convert Unix timestamps (in seconds) or DateTime to readable DateTime
 $userActivities = $filteredActivities | ForEach-Object {
-    $activity = $_
-    $unixTime = $activity.activityTime
-    $activityTime = $null
-
-    # Safely handle the activityTime conversion
-    if ($unixTime -is [int64]) {
-        # If it's a 64-bit integer, convert directly
-        $activityTime = [System.DateTimeOffset]::FromUnixTimeSeconds($unixTime).DateTime
-    }
-    elseif ($unixTime -is [double]) {
-        # If it's a double (floating point), convert to a long (64-bit integer) by rounding or flooring
-        $roundedUnixTime = [long][math]::Floor($unixTime)
-        $activityTime = [System.DateTimeOffset]::FromUnixTimeSeconds($roundedUnixTime).DateTime
-    }
-    elseif ($unixTime -is [datetime]) {
-        # If already a DateTime, no conversion needed
-        $activityTime = $unixTime
-    }
-    else {
-        # If it's not an expected type, log an error
-        Write-Error "Invalid activity time format encountered: $unixTime"
-    }
-
-    # Update the activity's time field with the converted DateTime if valid
-    if ($activityTime) {
-        $activity.activityTime = $activityTime
-    }
-
-    # Return the updated activity object
-    $activity
-  }
+    $_.activityTime = Convert-ActivityTime $_.activityTime
+    $_
+}
 } catch {
     Write-Error "Failed to retrieve activities. Error: $_"
     exit
@@ -475,8 +466,8 @@ if ($CreateKB -or $CreateDocument) {
                 $install | Add-Member -MemberType NoteProperty -Name "DeviceName" -Value $current_Device.systemName -Force
                 
                 # Convert Unix timestamps to readable format
-                $install.installedAt = ([DateTimeOffset]::FromUnixTimeSeconds($install.installedAt).DateTime).ToString()
-                $install.timestamp = ([DateTimeOffset]::FromUnixTimeSeconds($install.timestamp).DateTime).ToString()
+                $install.installedAt = Convert-ActivityTime $install.installedAt
+                $install.timestamp = Convert-ActivityTime $install.timestamp
             }
 
             # Prepare the data for the table
@@ -660,8 +651,8 @@ if ($CreateGlobalKB) {
         $patchinstall | Add-Member -MemberType NoteProperty -Name "OrganizationName" -Value $organization.name -Force
 
         # Convert Unix timestamps to readable format
-        $patchinstall.installedAt = ([DateTimeOffset]::FromUnixTimeSeconds($patchinstall.installedAt).DateTime).ToString()
-        $patchinstall.timestamp = ([DateTimeOffset]::FromUnixTimeSeconds($patchinstall.timestamp).DateTime).ToString()
+        $patchinstall.installedAt = Convert-ActivityTime $patchinstall.installedAt
+        $patchinstall.timestamp = Convert-ActivityTime $patchinstall.timestamp
 
         # Collect the necessary properties into a custom object
         $AggregatedPatchInstall = [PSCustomObject]@{
