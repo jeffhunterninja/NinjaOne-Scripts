@@ -33,11 +33,11 @@ This PowerShell script generates a report of Windows device patch installations 
    Add these in the NinjaOne script editor after importing the script.
 
 
-| Environment Variable   | Pretty Name            | Type   |
+| Environment Variable   | Pretty Name            | Script Variable Type   |
 |------------------------|------------------------|--------|
-| `sendToKnowledgeBase`  | Send To Knowledge Base | Switch |
-| `sendToDocumentation`  | Send To Documentation  | Switch |
-| `globalOverview`       | Global Overview        | Switch |
+| `sendToKnowledgeBase`  | Send To Knowledge Base | Checkbox |
+| `sendToDocumentation`  | Send To Documentation  | Checkbox |
+| `globalOverview`       | Global Overview        | Checkbox |
 
 I'd recommend running this on a monthly basis, or weekly at the most frequent, as warranty updates in NinjaOne do not occur on a more frequenct cadence than weekly.
 
