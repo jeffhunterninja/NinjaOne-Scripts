@@ -40,4 +40,4 @@ This PowerShell script generates a report of Windows device patch installations 
 | `reportMonth`          | Report Month           | String |
 
 
-![Patch Installations](https://github.com/jeffhunterninja/NinjaOne-Scripts/blob/main/Windows%20OS%20Patch%20Reporting/patchinstallations.png?raw=true))
+![Patch Installations](https://github.com/jeffhunterninja/NinjaOne-Scripts/blob/main/Windows%20OS%20Patch%20Reporting/patchinstallations.png))
