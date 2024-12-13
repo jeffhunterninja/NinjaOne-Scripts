@@ -32,11 +32,11 @@ This PowerShell script generates a report of Windows device patch installations 
    Add these in the NinjaOne script editor after importing the script.
 
 
-| Environment Variable   | Pretty Name            | Type   |
+| Name   | Pretty Name            | Type   |
 |------------------------|------------------------|--------|
-| `sendToKnowledgeBase`  | Send To Knowledge Base | Switch |
-| `sendToDocumentation`  | Send To Documentation  | Switch |
-| `globalOverview`       | Global Overview        | Switch |
+| `sendToKnowledgeBase`  | Send To Knowledge Base | Checkbox |
+| `sendToDocumentation`  | Send To Documentation  | Checkbox |
+| `globalOverview`       | Global Overview        | Checkbox |
 | `reportMonth`          | Report Month           | String |
 
 
