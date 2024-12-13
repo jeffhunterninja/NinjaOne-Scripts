@@ -22,13 +22,17 @@ This PowerShell script generates a report of Windows device patch installations 
 
 ## Prerequisites
 
-1. **PowerShell 7+**  
+1. **Set Up an API Server/Automated Documentation Server**
+   Follow the instructions here:  
+   [https://docs.mspp.io/ninjaone/getting-started](https://docs.mspp.io/ninjaone/getting-started)
+
+2. **PowerShell 7+**  
    If PowerShell 7 is not installed, the script will prompt to restart itself in PowerShell 7.
 
-2. **NinjaOne Documentation**  
+3. **NinjaOne Documentation**  
    You will need to have NinjaOne Documentation enabled in your NinjaOne instance.
 
-3. **Script Variables**  
+4. **Script Variables**  
    Add these in the NinjaOne script editor after importing the script.
 
 
