@@ -17,7 +17,7 @@ This PowerShell script generates a report of Windows device patch installations 
   - Organization-specific documentation.
   - Knowledge Base articles in NinjaOne.
   - Global KB articles for aggregated patch data.
-
+- Microsoft Defender Updates are excluded from this report
 ---
 
 ## Prerequisites
@@ -40,4 +40,4 @@ This PowerShell script generates a report of Windows device patch installations 
 | `reportMonth`          | Report Month           | String |
 
 
-
+![Patch Installations](https://github.com/jeffhunterninja/NinjaOne-Scripts/blob/main/Windows%20OS%20Patch%20Reporting/patchinstallations.png?raw=true))
