@@ -40,3 +40,6 @@ This PowerShell script generates a report of Windows device patch installations 
 | `globalOverview`       | Global Overview        | Switch |
 
 I'd recommend running this on a monthly basis, or weekly at the most frequent, as warranty updates in NinjaOne do not occur on a more frequenct cadence than weekly.
+
+![Warranty Report](https://github.com/jeffhunterninja/NinjaOne-Scripts/blob/main/Warranty%20Reporting/warrantyreport.png?raw=true)
+
