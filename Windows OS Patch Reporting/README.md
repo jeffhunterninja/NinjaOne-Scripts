@@ -15,7 +15,7 @@ This PowerShell script generates a report of Windows device patch installations 
   - A **specific month and year** using the `-ReportMonth` parameter (e.g., "December 2024").
 - Creates or updates:
   - Organization-specific documentation.
-  - Knowledge Base articles in NinjaOne.
+  - Organization-specific Knowledge Base articles in NinjaOne.
   - Global KB articles for aggregated patch data.
 - Microsoft Defender Updates are excluded from this report
 ---
