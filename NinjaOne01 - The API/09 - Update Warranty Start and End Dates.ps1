@@ -103,8 +103,8 @@ $assets = foreach ($warrantyimport in $warrantyimports) {
 # Update the display names for each asset
 foreach ($asset in $assets) {
     if ($null -ne $asset.ID) {
-        # Define NinjaOne API endpoint for updating display name
-        $displayname_url = "https://$NinjaOneInstance/api/v2/device/" + $asset.ID
+        # Define NinjaOne API endpoint for updating warranty information
+        $warranty_url = "https://$NinjaOneInstance/api/v2/device/" + $asset.ID
         
         $WarrantyFields = @{
             'startDate' = Convert-ToUnixTime -DateTime $asset.StartDate
@@ -119,15 +119,15 @@ foreach ($asset in $assets) {
         # Convert the request body to JSON
         $json = $request_body | ConvertTo-Json
 
-        Write-Host "Changing display name for:" $asset.Name "to" $asset.DisplayName
+        Write-Host "Uploading warranty data for:" $asset.ID
 
-        # Update the display name via the API
+        # Update the warranty info via the API
         try {
-            Invoke-RestMethod -Method 'Patch' -Uri $displayname_url -Headers $headers -Body $json -ContentType "application/json" -Verbose
+            Invoke-RestMethod -Method 'Patch' -Uri $warranty_url -Headers $headers -Body $json -ContentType "application/json" -Verbose
         } catch {
             Write-Error "Failed to update set warranty info for $($asset.ID). $_"
         }
     } else {
-        Write-Warning "Skipping warranty update for $($asset.Name) as ID is null."
+        Write-Warning "Skipping warranty update for $($asset.ID) as ID is null."
     }
 }
