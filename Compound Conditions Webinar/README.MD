@@ -19,8 +19,6 @@ Access the script to update deployed software here, and import it into NinjaOne.
 #### Required Script Variables:
 | Name | Pretty Name | Script Variable Type |
 |------|------------|----------------------|
-| `commaSeparatedListOfOrganizationsToUpdate` | Comma Separated List Of Organizations To Update | String/Text |
-| `updateOrganizationsBasedOnCurrentSoftwareInventory` | Update Organizations Based On Current Software Inventory | Checkbox |
 | `appendToOrganizations` | Append To Organizations | String/Text |
 | `softwareToAppend` | Software To Append | String/Text |
 | `removeFromOrganizations` | Remove From Organizations | String/Text |
