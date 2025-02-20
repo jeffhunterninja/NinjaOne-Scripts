@@ -1,4 +1,4 @@
-Thank you to all who attended the Compound Conditions webinar, which you can find on YouTube here:
+Thank you to all who attended the Compound Conditions webinar, which you can find on YouTube [here]{https://youtu.be/y7WvImYobJ0}
 
 ## First Example: Software Deployment with Compound Conditions
 
