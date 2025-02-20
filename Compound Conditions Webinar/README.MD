@@ -60,7 +60,7 @@ The third example utilized **NinjaOne Documentation** to create a document with 
    - A document is created in **NinjaOne Documentation** with checkboxes that specify if certain device configurations should be enabled (e.g., "Enable Firewall").
    
 2. **Script Result Condition (Check Configuration Intent)**  
-   - A **script result condition** is used as part of a **compound condition** to check if the checkbox is marked in the documentation.
+   - A **script result condition** is used as part of a **compound condition** to check if the checkbox is marked in the documentation - this script here: https://github.com/jeffhunterninja/NinjaOne-Scripts/blob/main/Compound%20Conditions%20Webinar/Check%20Device%20Configurations%20Document.ps1
 
 3. **Script Result Condition (Verify Device State)**  
    - A second **script result condition** evaluates the actual **state of the device**.
