@@ -3,6 +3,8 @@
 This script demonstrates how to interact with the NinjaOne API, import device data from a CSV, match it with devices from NinjaOne, and update custom fields dynamically based on CSV headers.  
 It includes enhanced error handling, logging, and dynamic request body generation. This has only been tested with text, multiline, and checkbox types of custom fields. Only field types that accept a string value are likely to work, anything involving attachments or WYSIWYG fields is not likely to function.
 
+You can see this script in action here: https://www.youtube.com/watch?v=QvDygAJrlq0 (around 31:40)
+
 ## Parameters
 
 ### `$OverwriteEmptyValues`
