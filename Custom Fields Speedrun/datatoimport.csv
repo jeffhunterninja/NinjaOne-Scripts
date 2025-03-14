@@ -1,0 +1,24 @@
+Id,name,assetTag,assignedUser,assetStatus
+2,AEDEMOCA-W11-01,AT00002,logan.wagner@example.com,Deployed
+3,AEDEMOCA-W11-02,AT00003,john.lee@example.com,Deployed
+4,AEDEMOCA-W11-03,AT00004,,Not in use
+5,AEDEMOCA-W11-04,AT00005,christopher.lloyd@example.com,Deployed
+6,AEDEMOCA-W11-05,AT00006,melissa.cruz@example.com,Deployed
+7,AEDEMO-WIN10-01,AT00007,stephanie.jimenez@example.com,Deployed
+8,AEDEMOCA-WIN10-,AT00008,sharon.mills@example.com,Deployed
+9,AUS-AEDEMOCA-WI,AT00009,brianna.garcia@example.com,Deployed
+10,AEDEMOCA-W10-04,AT00010,jessica.turner@example.com,Deployed
+11,AEDEMOCA-WIN1-0,AT00011,john.schultz@example.com,Deployed
+12,AEDEMOCA-W10-06,AT00012,randy.schneider@example.com,Deployed
+13,AEDEMOCA-W10-07,AT00013,michelle.goodman@example.com,Deployed
+14,AEDEMOCA-W10-08,AT00014,joseph.wilson@example.com,Deployed
+15,AEDEMOCA-WIN1-1,AT00015,aaron.kline@example.com,Deployed
+16,AEDEMOCA-W10-10,AT00016,nicholas.jackson@example.com,Deployed
+17,AEDEMOCA-W10-11,AT00017,kendra.lewis@example.com,Deployed
+22,AEDEMOCA-W10-12,AT00022,rachael.maldonado@example.com,Deployed
+23,AEDEMOCA-W10-13,AT00023,melissa.allen@example.com,Deployed
+24,AEDEMOCA-W10-14,AT00024,laura.warren@example.com,Deployed
+25,AEDEMOCA-W10-15,AT00025,vincent.scott@example.com,Deployed
+27,AEDEMOCA-WS22-0,AT00027,joshua.cruz@example.com,Deployed
+29,AEDEMOCA-HYP-01,AT00029,andrea.ramirez@example.com,Deployed
+39,AEDEMOCA-W22-01,AT00039,emma.padilla@example.com,Deployed
