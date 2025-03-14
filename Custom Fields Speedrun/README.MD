@@ -5,6 +5,8 @@ It includes enhanced error handling, logging, and dynamic request body generatio
 
 You can see this script in action here: https://www.youtube.com/watch?v=QvDygAJrlq0 (around 31:40)
 
+Example CSV used to import data during webinar: https://github.com/jeffhunterninja/NinjaOne-Scripts/blob/main/Custom%20Fields%20Speedrun/datatoimport.csv
+
 ## Parameters
 
 ### `$OverwriteEmptyValues`
