@@ -46,3 +46,13 @@ This document outlines the configurable script variables used to define scheduli
   - `Window Day of Week` (if recurrence is `Weekly`)
 
 ---
+**Important Note About Condition Resets and Script Timeouts**
+
+It is not recommended to use "When no longer" for any mode - only use time-based resets.
+
+For any mode, it's important to adjust the $TimeWindowMinutes variable in the script to be in sync with your interval and script timeout. For example, if I'm running my compound condition every 15 minutes, I would set my $TimeWindowMinutes to 16 minutes. This allows the script to sleep until the desired $TargetTime is reached. I need to ensure that the timeout for the script exceeds my $TimeWindowMinutes - so in my case I would make it 17 minutes.
+-Script interval
+-$TimeWindowMinutes = interval + 1 minute
+-Script timeout = interval + 2 minutes
+
+When using Window mode, it also becomes important to ensure the auto-reset is longer than the maintenance window - i.e. a 4 hour maintenance window should have a 4 hour or longer auto-reset time. If the reset is too short, the automation could potentially trigger again if there is not an adequate state change monitor as a part of the compound condition.
