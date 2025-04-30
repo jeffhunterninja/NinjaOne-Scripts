@@ -1,5 +1,7 @@
 # **NinjaOne Windows Patch Installation Report Script**
 
+Video overview of settings up an API server and this script: https://www.youtube.com/watch?v=Qy9g6-KVfbo
+
 ## **Overview**
 This PowerShell script generates a report of Windows device patch installations for the specified month and year using the **NinjaOne API**. It can generate:
 - **Documentation** in the NinjaOne platform
