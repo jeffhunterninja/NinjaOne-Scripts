@@ -1,0 +1,3 @@
+This script presumes you have a CSV with two columns, one with a header of systemName, and one column with a header of displayName. Insert your CSV's file patch on line 40 of the attached script. The script then attempts to match to the device in Ninja based on this systemName. This does also presume that all of your machines have unique system names - if you have duplicate system names, you'll need to find another matching criteria. This version of the script can very easily be modified to directly use the unique device ID in Ninja instead of name match based on system name.
+
+You'll need to create API creds using client credentials with monitoring and management scopes, using the machine-to-machine application type.
