@@ -99,8 +99,6 @@ Create two custom fields in NinjaOne under **Devices → Custom Fields**:
 | **Type** | PowerShell |
 | **OS** | Windows |
 | **Run As** | SYSTEM |
-| **PowerShell Version** | 5.1 |
-| **Execution Policy** | Bypass |
 | **Timeout** | ≥ 60 seconds recommended |
 
 Paste the full original script into the script body.
