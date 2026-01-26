@@ -5,7 +5,7 @@ Any scripts should be evaluated and tested in a controlled setting before being 
 As this script is an educational example, further improvements and enhancement may be necessary to handle larger datasets.
 
 ## Additional notes: 
-## This works with the 6.0 version of NinjaOne
+## This works with the 11.0 version of NinjaOne
 ## Currently only contacts can be assigned to devices via the API
 ## Technicians and end users will need to be manually assigned within the NinjaOne webapp for the time being
 
