@@ -12,7 +12,7 @@ This uses the API server workflow described here: https://docs.mspp.io/ninjaone-
 
 The first part of this video walks through setting up an API server if you haven't done it before: https://www.youtube.com/watch?v=Qy9g6-KVfbo
 
-## Required Custom Fields (for write-back)
+## Required Custom Fields
 
 Create the following **Device-scope** custom fields with the listed permissions.  
 You may rename these fields, but if you do, you must update the keys in `New-CustomFieldPayloadFromReport` accordingly.
