@@ -6,8 +6,11 @@ This script retrieves **activities** from the NinjaOne Public API for a specifie
 - A Day-of-Month × Month heatmap of triggers (rendered as HTML)
 - The total number of devices in the environment that have a condition that has triggered over the past 30 days
 
-The script can optionally **write these results back to each device as custom fields** using:
-`PATCH /api/v2/device/{deviceId}/custom-fields`.
+The script will then **write these results back to each device as custom fields**.
+
+This uses the API server workflow described here: https://docs.mspp.io/ninjaone-auto-documentation/getting-started
+
+The first part of this video walks through setting up an API server if you haven't done it before: https://www.youtube.com/watch?v=Qy9g6-KVfbo
 
 ## Required Custom Fields (for write-back)
 
@@ -27,3 +30,6 @@ You may rename these fields, but if you do, you must update the keys in `New-Cus
   - `mostFrequentAlerts`: HTML table of the device’s top 10 triggered conditions
   - `alertHeatMap`: HTML heatmap table (Day 1–31 × Month)
 - The script warns if HTML output approaches NinjaOne WYSIWYG size limits (the helper checks ~200,000 characters).
+
+### Disclaimer
+- This is a personal project provided as an educational example of how to interact with the NinjaOne API, and does not fall within the scope of NinjaOne support.
