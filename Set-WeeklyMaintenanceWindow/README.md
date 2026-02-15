@@ -2,6 +2,8 @@
 
 This script **sets weekly maintenance windows** for organizations, locations, and devices in NinjaOne by importing values from a CSV. You define maintenance day, start time, and end time (and any other custom fields) in the CSV; the script updates the corresponding NinjaOne custom fields for each entity.
 
+**Important Note** that this script does not directly leverage the maintenance mode feature of NinjaOne. Instead, it imports the intended maintenance window into custom fields where the values can be used to logically determine script behavior. For instance, a pre-script could run to ensure that patching isn't conducted outside of a maintenance window.
+
 Under the hood it imports custom field values at **organization**, **location**, and **device** levels. Each row is routed by a `level` column; the `name` column identifies the target. All other columns are treated as custom field name = value (e.g. `maintenanceDay`, `maintenanceStart`, `maintenanceEnd`).
 
 ## Requirements
@@ -34,7 +36,7 @@ Custom fields must already exist in NinjaOne at the appropriate level (Administr
 ## Usage
 
 ```powershell
-.\Import-NinjaOneCustomFieldsFromCsv.ps1 -CsvPath "C:\data\maintenance-windows.csv" `
+.\Set-WeeklyMaintenanceWindow.ps1 -CsvPath "C:\data\maintenance-windows.csv" `
   -NinjaOneInstance "app.ninjarmm.com" `
   -NinjaOneClientId "your-client-id" `
   -NinjaOneClientSecret "your-client-secret"
@@ -46,7 +48,7 @@ With environment variables set:
 $env:NinjaOneInstance = "app.ninjarmm.com"
 $env:NinjaOneClientId = "your-client-id"
 $env:NinjaOneClientSecret = "your-client-secret"
-.\Import-NinjaOneCustomFieldsFromCsv.ps1 -CsvPath ".\Import-CustomFields-Example.csv"
+.\Set-WeeklyMaintenanceWindow.ps1 -CsvPath ".\Import-CustomFields-Example.csv"
 ```
 
 To clear existing values when a cell is empty:
@@ -77,3 +79,4 @@ Rename the example columns to match your NinjaOne custom field names (`maintenan
 
 - NinjaOne API OAuth application with **monitoring** and **management** scope.
 - Custom fields created in NinjaOne at the desired level(s) for maintenance window (and any other data), with names matching the CSV column headers (excluding `level` and `name`).
+
