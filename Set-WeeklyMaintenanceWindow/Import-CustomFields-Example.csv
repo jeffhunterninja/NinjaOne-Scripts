@@ -1,0 +1,4 @@
+level,name,maintenanceStart,maintenanceEnd,maintenanceDay
+organization,Internal Infrastructure,02:00,04:00,Sunday
+location,"Internal Infrastructure,Main Office",01:00,03:00,Saturday
+device,TimCreedonVM,00:00,02:00,Tuesday
