@@ -18,42 +18,68 @@
 # CONFIG (edit these)
 # -----------------------------
 $Config = [ordered]@{
-    Instance     = "https://ca.ninjarmm.com"
-    ClientId     = Ninja-Property-Get ninjaoneClientId
-    ClientSecret = Ninja-Property-Get ninjaoneClientSecret
+    # Instance base URL:
+    #   NA: https://app.ninjarmm.com
+    #   US2: https://us2.ninjarmm.com
+    #   EU: https://eu.ninjarmm.com
+    #   OC: https://oc.ninjarmm.com
+    Instance     = Get-NinjaProperty "ninjaoneInstance"
+
+    ClientId     = Get-NinjaProperty "ninjaoneClientId"
+    ClientSecret = Get-NinjaProperty "ninjaoneClientSecret"
+
+    # Scopes depend on what you're querying; "monitoring" is commonly needed for read access.
+    # You can space-separate them for client_credentials.
     Scope        = "monitoring management"
 }
 
-Set-StrictMode -Version Latest
-
-# Check for required PowerShell version (7+)
-if (!($PSVersionTable.PSVersion.Major -ge 7)) {
-    try {
-        if (!(Test-Path "$env:SystemDrive\Program Files\PowerShell\7")) {
-            Write-Output 'Does not appear Powershell 7 is installed'
-            exit 1
-        }
-
-        # Refresh PATH
-        $env:Path = [System.Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [System.Environment]::GetEnvironmentVariable('Path', 'User')
-        
-        # Restart script in PowerShell 7
-        pwsh -File "`"$PSCommandPath`"" @PSBoundParameters
-        
-    }
-    catch {
-        Write-Output 'PowerShell 7 was not installed. Update PowerShell and try again.'
-        throw $Error
-    }
-    finally { exit $LASTEXITCODE }
+# -----------------------------
+# Constants (field names, API paths – edit to match your NinjaOne custom field API names)
+# -----------------------------
+$CustomFieldNames = [ordered]@{
+    TotalConditionsTriggered = 'totalConditionsTriggered'
+    DeviceAlertRank         = 'deviceAlertRank'
+    TotalAlertingDevices    = 'totalAlertingDevices'
+    AlertHeatMap            = 'alertHeatMap'
+    MostFrequentAlerts      = 'mostFrequentAlerts'
 }
 
+$ActivityProps = [ordered]@{
+    ActivityType    = 'activityType'
+    StatusCode      = 'statusCode'
+    ActivityTime    = 'activityTime'
+    DeviceId        = 'deviceId'
+    Message         = 'message'
+    Subject         = 'subject'
+    SourceConfigUid = 'sourceConfigUid'
+}
+
+$ActivityFilter = @{
+    Type   = 'CONDITION'
+    Status = 'TRIGGERED'
+}
+
+$ApiPaths = @{
+    OAuthToken   = '/oauth/token'
+    Activities   = '/api/v2/activities'
+    CustomFields = '/api/v2/device/{0}/custom-fields'
+}
+
+$ResponseProps = @{
+    Activities = 'activities'
+}
+
+$HtmlTableExcludeProps   = @('RowColour')
+$HtmlTableRowColourProp  = 'RowColour'
+$NinjaHtmlCharLimit     = 200000
+
+Set-StrictMode -Version Latest
 
 # ===== Defaults =====
 $OverwriteEmptyValues = $false
 
 # -----------------------------
-# Helpers
+# API helpers
 # -----------------------------
 function New-QueryString {
     param([hashtable]$Params)
@@ -95,7 +121,7 @@ function Get-NinjaOneAccessToken {
         [Parameter()][string]$Scope = ""
     )
 
-    $tokenUri = "$Instance/oauth/token"
+    $tokenUri = "$Instance$($ApiPaths.OAuthToken)"
 
     $body = @{
         grant_type    = "client_credentials"
@@ -112,39 +138,6 @@ function Get-NinjaOneAccessToken {
     catch {
         throw "Failed to obtain access token from $tokenUri. $($_.Exception.Message)"
     }
-}
-
-function ConvertTo-ObjectToHtmlTable {
-    param (
-        [Parameter(Mandatory = $true)]
-        [System.Collections.Generic.List[Object]]$Objects
-    )
-    $sb = New-Object System.Text.StringBuilder
-    # Start the HTML table
-    [void]$sb.Append('<table><thead><tr>')
-    # Add column headers based on the properties of the first object, excluding "RowColour"
-    $Objects[0].PSObject.Properties.Name |
-    Where-Object { $_ -ne 'RowColour' } |
-    ForEach-Object { [void]$sb.Append("<th>$_</th>") }
-
-    [void]$sb.Append('</tr></thead><tbody>')
-    foreach ($obj in $Objects) {
-        # Use the RowColour property from the object to set the class for the row
-        $rowClass = if ($null -ne $obj.PSObject.Properties['RowColour']) { $obj.RowColour } else { "" }
-
-        [void]$sb.Append("<tr class=`"$rowClass`">")
-        # Generate table cells, excluding "RowColour"
-        foreach ($propName in $obj.PSObject.Properties.Name | Where-Object { $_ -ne 'RowColour' }) {
-            [void]$sb.Append("<td>$($obj.$propName)</td>")
-        }
-        [void]$sb.Append('</tr>')
-    }
-    [void]$sb.Append('</tbody></table>')
-    $OutputLength = $sb.ToString() | Measure-Object -Character -IgnoreWhiteSpace | Select-Object -ExpandProperty Characters
-    if ($OutputLength -gt 200000) {
-        Write-Warning ('Output appears to be over the NinjaOne WYSIWYG field limit of 200,000 characters. Actual length was: {0}' -f $OutputLength)
-    }
-    return $sb.ToString()
 }
 
 function Invoke-NinjaOneGet {
@@ -170,8 +163,28 @@ function Invoke-NinjaOneGet {
     }
 }
 
+function Invoke-NinjaAPIRequest {
+  param(
+    [Parameter(Mandatory=$true)][string]$Uri,
+    [ValidateSet('GET','POST','PATCH','PUT','DELETE')][string]$Method = 'GET',
+    [Parameter(Mandatory=$true)][hashtable]$Headers,
+    [string]$Body = $null
+  )
+
+  $maxRetries = 3
+  for ($i = 1; $i -le $maxRetries; $i++) {
+    try {
+      return Invoke-RestMethod -Uri $Uri -Method $Method -Headers $Headers -Body $Body -ContentType "application/json"
+    } catch {
+      Write-Warning "API request failed (attempt $i/$maxRetries): $Uri :: $($_.Exception.Message)"
+      Start-Sleep -Seconds 2
+    }
+  }
+  return $null
+}
+
 # -----------------------------
-# Main: Get Activities in window (auto-pages with olderThan)
+# Activity fetching (auto-pages with olderThan)
 # -----------------------------
 function Get-NinjaOneActivitiesInRange {
     param(
@@ -224,11 +237,11 @@ function Get-NinjaOneActivitiesInRange {
         if ($expandActivities.IsPresent) { $qp.expand = "activities" }
         if ($null -ne $olderThan) { $qp.olderThan = $olderThan }
 
-        $resp = Invoke-NinjaOneGet -Instance $Instance -Path "/api/v2/activities" -AccessToken $AccessToken -QueryParams $qp
+        $resp = Invoke-NinjaOneGet -Instance $Instance -Path $ApiPaths.Activities -AccessToken $AccessToken -QueryParams $qp
 
         # ✅ Normalize: the real records are usually in resp.activities
         $items =
-            if ($null -ne $resp -and $resp.PSObject.Properties.Name -contains "activities") { @($resp.activities) }
+            if ($null -ne $resp -and $resp.PSObject.Properties.Name -contains $ResponseProps.Activities) { @($resp.$($ResponseProps.Activities)) }
             else { @($resp) }
 
         if ($items.Count -eq 0) { break }
@@ -304,7 +317,9 @@ function Get-NinjaOneActivitiesInRangeMultiType {
     return $deduped
 }
 
-
+# -----------------------------
+# Main execution
+# -----------------------------
 if (-not $Config.Instance -or -not $Config.ClientId -or -not $Config.ClientSecret) {
     throw "Config requires Instance, ClientId, and ClientSecret."
 }
@@ -314,7 +329,7 @@ $headers = @{ Authorization = "Bearer $token"; Accept = "application/json" }
 $After   = (Get-Date).AddDays(-30)
 $Before  = Get-Date
 
-$typesWanted = @("CONDITION")
+$typesWanted = @($ActivityFilter.Type)
 
 $activities = Get-NinjaOneActivitiesInRangeMultiType `
   -Instance $Config.Instance `
@@ -350,8 +365,9 @@ Notes:
 - conditionKey = sourceConfigUid|subject (subject may be blank)
 #>
 
-Set-StrictMode -Version Latest
-
+# -----------------------------
+# Report helpers
+# -----------------------------
 function Convert-FromUnixSecondsUtc {
   param([Parameter(Mandatory)][double]$UnixSeconds)
   (Get-Date -Date '1970-01-01T00:00:00Z').AddSeconds($UnixSeconds)
@@ -370,26 +386,39 @@ function Get-PropValue {
 
 function Get-ConditionKey {
   param([Parameter(Mandatory)]$a)
-  $cfg = Get-PropValue $a 'sourceConfigUid'
-  $sub = Get-PropValue $a 'subject'
+  $cfg = Get-PropValue $a $ActivityProps.SourceConfigUid
+  $sub = Get-PropValue $a $ActivityProps.Subject
   if (-not $cfg) { $cfg = '<noConfigUid>' }
   if ([string]::IsNullOrWhiteSpace($sub)) { $sub = '<noSubject>' }
   "$cfg|$sub"
 }
 
-function Escape-Html {
-  param([Parameter()][string]$s)
-  if ($null -eq $s) { return "" }
-  $s.Replace('&','&amp;').Replace('<','&lt;').Replace('>','&gt;').Replace('"','&quot;').Replace("'","&#39;")
-}
+function ConvertTo-ObjectToHtmlTable {
+    param (
+        [Parameter(Mandatory = $true)]
+        [System.Collections.Generic.List[Object]]$Objects
+    )
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.Append('<table><thead><tr>')
+    $Objects[0].PSObject.Properties.Name |
+    Where-Object { $_ -notin $HtmlTableExcludeProps } |
+    ForEach-Object { [void]$sb.Append("<th>$_</th>") }
 
-function Convert-TopConditionsToTextTable {
-  param([Parameter(Mandatory)]$TopConditions)
-  # $TopConditions should be an array of objects with: Count, ConditionName, ConditionKey
-  $TopConditions |
-    Select-Object @{n='Triggers';e={$_.Count}}, @{n='Condition';e={$_.ConditionName}}, @{n='Key';e={$_.ConditionKey}} |
-    Format-Table -AutoSize |
-    Out-String
+    [void]$sb.Append('</tr></thead><tbody>')
+    foreach ($obj in $Objects) {
+        $rowClass = if ($null -ne $obj.PSObject.Properties[$HtmlTableRowColourProp]) { $obj.$HtmlTableRowColourProp } else { "" }
+        [void]$sb.Append("<tr class=`"$rowClass`">")
+        foreach ($propName in $obj.PSObject.Properties.Name | Where-Object { $_ -notin $HtmlTableExcludeProps }) {
+            [void]$sb.Append("<td>$($obj.$propName)</td>")
+        }
+        [void]$sb.Append('</tr>')
+    }
+    [void]$sb.Append('</tbody></table>')
+    $OutputLength = $sb.ToString() | Measure-Object -Character -IgnoreWhiteSpace | Select-Object -ExpandProperty Characters
+    if ($OutputLength -gt $NinjaHtmlCharLimit) {
+        Write-Warning ('Output appears to be over the NinjaOne WYSIWYG field limit of 200,000 characters. Actual length was: {0}' -f $OutputLength)
+    }
+    return $sb.ToString()
 }
 
 function Get-MapColour {
@@ -516,21 +545,21 @@ function Get-HeatMapTableHtml {
 if (-not $activities) { throw "Expected `$activities` to be populated." }
 
 $triggers = foreach ($a in $activities) {
-  $atype = Get-PropValue $a 'activityType'
-  $scode = Get-PropValue $a 'statusCode'
-  if ($atype -ne 'CONDITION' -or $scode -ne 'TRIGGERED') { continue }
+  $atype = Get-PropValue $a $ActivityProps.ActivityType
+  $scode = Get-PropValue $a $ActivityProps.StatusCode
+  if ($atype -ne $ActivityFilter.Type -or $scode -ne $ActivityFilter.Status) { continue }
 
-  $t = Get-PropValue $a 'activityTime'
+  $t = Get-PropValue $a $ActivityProps.ActivityTime
   $dt = $null
   if ($t -ne $null) {
     try { $dt = Convert-FromUnixSecondsUtc -UnixSeconds ([double]$t) } catch { $dt = $null }
   }
 
-  $deviceId = Get-PropValue $a 'deviceId'
+  $deviceId = Get-PropValue $a $ActivityProps.DeviceId
   $key      = Get-ConditionKey -a $a
-  $name     = Get-PropValue $a 'message'
-  $subject  = Get-PropValue $a 'subject'
-  $msg      = Get-PropValue $a 'message'
+  $name     = Get-PropValue $a $ActivityProps.Message
+  $subject  = Get-PropValue $a $ActivityProps.Subject
+  $msg      = Get-PropValue $a $ActivityProps.Message
 
   # Friendly name fallback if sourceName is blank
   if ([string]::IsNullOrWhiteSpace($name)) {
@@ -701,28 +730,9 @@ $d.heatmapHtml | Out-File -Encoding utf8 $path
  
 Write-Host "Wrote $path"
 
-function Invoke-NinjaAPIRequest {
-  param(
-    [Parameter(Mandatory=$true)][string]$Uri,
-    [ValidateSet('GET','POST','PATCH','PUT','DELETE')][string]$Method = 'GET',
-    [Parameter(Mandatory=$true)][hashtable]$Headers,
-    [string]$Body = $null
-  )
-
-  $maxRetries = 3
-  for ($i = 1; $i -le $maxRetries; $i++) {
-    try {
-      return Invoke-RestMethod -Uri $Uri -Method $Method -Headers $Headers -Body $Body -ContentType "application/json"
-    } catch {
-      Write-Warning "API request failed (attempt $i/$maxRetries): $Uri :: $($_.Exception.Message)"
-      Start-Sleep -Seconds 2
-    }
-  }
-  return $null
-}
-
-# ========= MAP REPORT -> CUSTOM FIELDS =========
-# IMPORTANT: replace these keys with your actual NinjaOne custom field *API names*
+# -----------------------------
+# Custom field mapping
+# -----------------------------
 function New-CustomFieldPayloadFromReport {
   param(
     [Parameter(Mandatory=$true)]$Report,
@@ -747,11 +757,11 @@ function New-CustomFieldPayloadFromReport {
     $cf[$Key] = @{ html = $Html }
   }
 
-  Set-CF -Key 'totalConditionsTriggered' -Value $Report.totalConditionsTriggered
-  Set-CF -Key 'deviceAlertRank' -Value $Report.rankAmongAlertingDevices
-  Set-CF -Key 'totalAlertingDevices' -Value $Report.totalAlertingDevices
-  Set-CFHtml -Key 'alertHeatMap' -Html $Report.heatmapHtml
-  Set-CFHtml -Key 'mostFrequentAlerts' -Html $Report.top10ConditionsTableText
+  Set-CF -Key $CustomFieldNames.TotalConditionsTriggered -Value $Report.totalConditionsTriggered
+  Set-CF -Key $CustomFieldNames.DeviceAlertRank -Value $Report.rankAmongAlertingDevices
+  Set-CF -Key $CustomFieldNames.TotalAlertingDevices -Value $Report.totalAlertingDevices
+  Set-CFHtml -Key $CustomFieldNames.AlertHeatMap -Html $Report.heatmapHtml
+  Set-CFHtml -Key $CustomFieldNames.MostFrequentAlerts -Html $Report.top10ConditionsTableText
 
   return $cf
 }
@@ -770,7 +780,7 @@ foreach ($r in $DeviceReports) {
     continue
   }
 
-  $customfields_url = "$($Config.Instance)/api/v2/device/$($r.deviceId)/custom-fields"
+  $customfields_url = "$($Config.Instance)$($ApiPaths.CustomFields -f $r.deviceId)"
   $json = $customFields | ConvertTo-Json -Depth 10
 
   Write-Host "Patching deviceId $($r.deviceId) with:"
