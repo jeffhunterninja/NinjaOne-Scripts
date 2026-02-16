@@ -87,12 +87,12 @@ Rename the example columns to match your NinjaOne custom field names (`patchingS
 
 ## Check-WeeklyPatchingSchedule.ps1
 
-This script determines whether the device **should patch now** based on a weekly patching schedule. It is designed to work with schedules set by **Set-WeeklyPatchingSchedule.ps1** and can be used in NinjaOne compound conditions to control when patching runs.
+This script determines whether the device **should patch now** based on a weekly patching schedule. It is designed to work with schedules set by **Set-WeeklyPatchingSchedule.ps1** and can be used in NinjaOne script result conditions to control when patching runs.
 
 ### Purpose (Check script)
 
 - **Exact-time patching**: Patching should occur at the exact start time. If the script runs shortly before that time (within the hold window), it waits until the exact time, then exits 0.
-- **Hold mechanism**: Because NinjaOne runs scripts on a schedule (e.g., every 15 minutes), the script may run before the patch time. Set `holdWindowMinutes` to match your schedule interval. For example, if the script runs every 15 min and patch is at 02:00, a run at 01:45 will wait 15 min until 02:00, then exit 0.
+- **Hold mechanism**: Because NinjaOne runs scripts on a schedule (e.g., every 15 minutes), the script may run before the patch time. Set `holdWindowMinutes` to match your schedule and timeout interval. For example, if the script runs every 15 min and patch is at 02:00, a run at 01:45 will wait 15 min until 02:00, then exit 0. The script must have enough of a timeout period to prevent the hold window from being compromised.
 - **NinjaOne custom fields only**: Reads values from NinjaOne custom fields (injected as environment variables when the script runs on a device). No script parameters.
 - **Two input formats**: HH:mm (e.g. `02:00`) or Unix milliseconds (as stored by Set-WeeklyPatchingSchedule).
 
