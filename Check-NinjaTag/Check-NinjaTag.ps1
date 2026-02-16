@@ -1,35 +1,61 @@
-param (
+#Requires -Version 5.1
+<#
+.SYNOPSIS
+  Checks if specified tags are present on the current device using the NinjaOne API.
+
+.DESCRIPTION
+  Evaluates device tag presence against tags supplied via parameters or NinjaOne script
+  variables. Supports two evaluation modes: ANY (at least one tag must be present) and
+  ALL (all specified tags must be present). Intended for use with NinjaOne compound
+  conditions and automation policies.
+
+.EXIT CODES
+  0 = Match found (tag condition satisfied)
+  1 = No match (tag condition not satisfied)
+  2 = Error (validation failure, Get-NinjaTag failure, etc.)
+#>
+
+[CmdletBinding()]
+param(
     [string]$Tags,
-    
-    [string]$Mode
+    [string]$Mode = 'any'
 )
 
-# Assign environment variables
-$Tags = $env:tagsToSearch
-$Mode = $env:mode
+$ErrorActionPreference = 'Stop'
 
-Write-Output $Tags
+# NinjaOne script variables populate env vars; use them when present
+if ($null -ne $env:tagsToSearch -and -not [string]::IsNullOrWhiteSpace($env:tagsToSearch)) {
+    $Tags = $env:tagsToSearch.Trim()
+}
+if ($null -ne $env:mode -and -not [string]::IsNullOrWhiteSpace($env:mode)) {
+    $Mode = $env:mode.Trim().ToLowerInvariant()
+} elseif ([string]::IsNullOrWhiteSpace($Mode)) {
+    $Mode = 'any'
+}
+
+# Normalize Mode for switch comparison
+$Mode = ($Mode -as [string]).Trim().ToLowerInvariant()
 
 try {
     # Convert input to array, trimming whitespace and ensuring it's always an array
-    $tagArray = @($Tags -split ',' | ForEach-Object { $_.Trim() })
+    $tagArray = @($Tags -split ',' | ForEach-Object { $_.Trim() } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
 
     if (-not $tagArray -or $tagArray.Count -eq 0) {
         Write-Error "No tags specified."
         exit 2
     }
 
-    # Get currently assigned tags from NinjaOne
-    $currentTags = Get-NinjaTag
+    # Get currently assigned tags from NinjaOne; ensure array form
+    $currentTags = @(Get-NinjaTag)
 
     if (-not $currentTags) {
         Write-Error "Unable to retrieve current tags."
         exit 2
     }
 
-    Write-Host "Raw Tags Input: '$Tags'"
-    Write-Host "Parsed Tags: $($tagArray -join ', ')"
-    Write-Host "Current Ninja Tags: $($currentTags -join ', ')"
+    Write-Verbose "Raw Tags Input: '$Tags'"
+    Write-Verbose "Parsed Tags: $($tagArray -join ', ')"
+    Write-Verbose "Current Ninja Tags: $($currentTags -join ', ')"
 
     # If only one tag was specified, check for it directly
     if ($tagArray.Count -eq 1) {
@@ -45,18 +71,16 @@ try {
     # Multi-tag logic based on $Mode
     switch ($Mode) {
         "all" {
-            # All specified tags must be present
-            $allFound = $tagArray | ForEach-Object { $currentTags -contains $_ } | Where-Object { $_ -eq $false } | Measure-Object
-            if ($allFound.Count -eq 0) {
+            $missingTags = $tagArray | Where-Object { $currentTags -notcontains $_ }
+            if ($missingTags.Count -eq 0) {
                 Write-Host "All specified tags are present."
                 exit 0
             } else {
-                Write-Host "Not all specified tags are present."
+                Write-Host "Not all specified tags are present. Missing: $($missingTags -join ', ')"
                 exit 1
             }
         }
         "any" {
-            # At least one specified tag must be present
             $anyFound = $tagArray | Where-Object { $currentTags -contains $_ }
             if ($anyFound.Count -gt 0) {
                 Write-Host "At least one specified tag is present: $($anyFound -join ', ')"
@@ -65,6 +89,10 @@ try {
                 Write-Host "None of the specified tags are present."
                 exit 1
             }
+        }
+        default {
+            Write-Error "Invalid Mode: '$Mode'. Use 'any' or 'all'."
+            exit 2
         }
     }
 }
