@@ -65,7 +65,7 @@ $NinjaOneInstance = Ninja-Property-Get ninjaoneInstance
 $NinjaOneClientId = Ninja-Property-Get ninjaoneClientId
 $NinjaOneClientSecret = Ninja-Property-Get ninjaoneClientSecret
 
-if (!$ninjaoneInstance -and !$NinjaOneClientId -and !$NinjaOneClientSecret) {
+if (!$NinjaOneInstance -or !$NinjaOneClientId -or !$NinjaOneClientSecret) {
     Write-Output "Missing required API credentials"
     exit 1
 }
@@ -96,52 +96,82 @@ function Convert-ActivityTime {
     }
 }
 
+function ConvertTo-QueryParamString {
+    param([Parameter(Mandatory)][hashtable]$QueryParams)
+    ($QueryParams.GetEnumerator() | ForEach-Object {
+        "$($_.Key)=$([System.Uri]::EscapeDataString([string]$_.Value))"
+    }) -join '&'
+}
+
+function Get-ReportDateRange {
+    param([string]$ReportMonth)
+    if ($ReportMonth) {
+        try {
+            $ParsedDate = [datetime]::ParseExact($ReportMonth, "MMMM yyyy", [cultureinfo]::InvariantCulture)
+            $FirstDayOfMonth = Get-Date -Year $ParsedDate.Year -Month $ParsedDate.Month -Day 1
+        }
+        catch {
+            Write-Error "Invalid ReportMonth format. Use 'MMMM yyyy' (e.g., 'December 2024')."
+            throw
+        }
+    } else {
+        $FirstDayOfMonth = Get-Date -Day 1
+    }
+    $LastDayOfMonth = $FirstDayOfMonth.AddMonths(1).AddDays(-1)
+    [PSCustomObject]@{
+        FirstDayOfMonth = $FirstDayOfMonth
+        LastDayOfMonth  = $LastDayOfMonth
+        currentMonth    = $FirstDayOfMonth.ToString("MMMM")
+        currentYear     = $FirstDayOfMonth.ToString("yyyy")
+        FirstDayString  = $FirstDayOfMonth.ToString('yyyyMMdd')
+        LastDayString   = $LastDayOfMonth.ToString('yyyyMMdd')
+    }
+}
+
+function Get-CategorizedPatchActivities {
+    param([Parameter(Mandatory)][array]$Activities)
+    $patchScans = [System.Collections.ArrayList]::new()
+    $patchScanFailures = [System.Collections.ArrayList]::new()
+    $patchApplicationCycles = [System.Collections.ArrayList]::new()
+    $patchApplicationFailures = [System.Collections.ArrayList]::new()
+    foreach ($activity in $Activities) {
+        if ($activity.activityResult -match "SUCCESS") {
+            if ($activity.statusCode -match "PATCH_MANAGEMENT_SCAN_COMPLETED") { [void]$patchScans.Add($activity) }
+            elseif ($activity.statusCode -match "PATCH_MANAGEMENT_APPLY_PATCH_COMPLETED") { [void]$patchApplicationCycles.Add($activity) }
+        } elseif ($activity.activityResult -match "FAILURE") {
+            if ($activity.statusCode -match "PATCH_MANAGEMENT_SCAN_COMPLETED") { [void]$patchScanFailures.Add($activity) }
+            elseif ($activity.statusCode -match "PATCH_MANAGEMENT_APPLY_PATCH_COMPLETED") { [void]$patchApplicationFailures.Add($activity) }
+        }
+    }
+    [PSCustomObject]@{
+        PatchScans             = @($patchScans)
+        PatchScanFailures      = @($patchScanFailures)
+        PatchApplicationCycles = @($patchApplicationCycles)
+        PatchApplicationFailures = @($patchApplicationFailures)
+    }
+}
 
 if ($CreateKB -or $CreateDocument -or $CreateGlobalKB) {
-# Define the month and year for the report
-if ($ReportMonth) {
-    try {
-        # Parse input as "MMMM yyyy" (e.g., "December 2024")
-        $ParsedDate = [datetime]::ParseExact($ReportMonth, "MMMM yyyy", [cultureinfo]::InvariantCulture)
-
-        # Set the first and last day of the specified month
-        $FirstDayOfMonth = Get-Date -Year $ParsedDate.Year -Month $ParsedDate.Month -Day 1
-        $LastDayOfMonth = $FirstDayOfMonth.AddMonths(1).AddDays(-1)
-        $currentMonth = $FirstDayOfMonth.ToString("MMMM")  # Get full month name (e.g., December)
-        $currentYear = $FirstDayOfMonth.ToString("yyyy")   # Get year (e.g., 2024)
-    }
-    catch {
-        Write-Error "Invalid ReportMonth format. Use 'MMMM yyyy' (e.g., 'December 2024')."
-        exit 1
-    }
+try {
+    $dateRange = Get-ReportDateRange -ReportMonth $ReportMonth
+} catch {
+    exit 1
 }
-else {
-    # Default to the current month and year
-    $FirstDayOfMonth = Get-Date -Day 1
-    $LastDayOfMonth = (Get-Date -Day 1).AddMonths(1).AddDays(-1)
-    # Define the current month and year
-    $currentMonth = (Get-Date).ToString("MMMM")
-    $currentYear = (Get-Date).Year.ToString()
-}
-
-# Formatting for API query parameters
-$FirstDayString = $FirstDayOfMonth.ToString('yyyyMMdd')
-$LastDayString = $LastDayOfMonth.ToString('yyyyMMdd')
+$FirstDayOfMonth = $dateRange.FirstDayOfMonth
+$LastDayOfMonth = $dateRange.LastDayOfMonth
+$currentMonth = $dateRange.currentMonth
+$currentYear = $dateRange.currentYear
+$FirstDayString = $dateRange.FirstDayString
+$LastDayString = $dateRange.LastDayString
 
 # Display the date range being used
 Write-Output "Generating report for: $($FirstDayOfMonth.ToString('MMMM yyyy'))"
 Write-Output "Report Date Range: $($FirstDayOfMonth.ToShortDateString()) - $($LastDayOfMonth.ToShortDateString())"
 
-
-# Collect user activities
-$patchScans = @()
-$patchScanFailures = @()
-$patchApplicationCycles = @()
-$patchApplicationFailures = @()
-
 # Fetch devices and organizations using module functions
 try {
-    $devices = Invoke-NinjaOneRequest -Method GET -Path 'devices-detailed' -QueryParams "df=class%20in%20(WINDOWS_WORKSTATION,%20WINDOWS_SERVER)"
+    $devicesQueryParams = @{ df = 'class in (WINDOWS_WORKSTATION, WINDOWS_SERVER)' }
+    $devices = Invoke-NinjaOneRequest -Method GET -Path 'devices-detailed' -QueryParams (ConvertTo-QueryParamString -QueryParams $devicesQueryParams)
     $organizations = Invoke-NinjaOneRequest -Method GET -Path 'organizations'
 
 }
@@ -157,112 +187,70 @@ $queryParams = @{
     installedBefore = $LastDayString
     installedAfter  = $FirstDayString
 }
+$QueryParamString = ConvertTo-QueryParamString -QueryParams $queryParams
 
-# Format the query parameters into a string (URL encoding)
-$QueryParamString = ($queryParams.GetEnumerator() | ForEach-Object { 
-    "$($_.Key)=$($_.Value -replace ' ', '%20')"
-}) -join '&'
-
-# Call Invoke-NinjaOneRequest using splatting
-$patchinstalls = Invoke-NinjaOneRequest -Method GET -Path 'queries/os-patch-installs' -QueryParams $QueryParamString | Select-Object -ExpandProperty 'results'
+# Call Invoke-NinjaOneRequest with pagination to collect all results in large environments
+$patchinstallsResponse = Invoke-NinjaOneRequest -Method GET -Path 'queries/os-patch-installs' -QueryParams $QueryParamString -Paginate
+$patchinstalls = if ($patchinstallsResponse.results) { $patchinstallsResponse.results } else { @($patchinstallsResponse | Select-Object -ExpandProperty 'results') }
 
 # Define query parameters for patch failures
 $queryParams = @{
-    df              = 'class in (WINDOWS_WORKSTATION, WINDOWS_SERVER)'
-    status          = 'Failed'
+    df     = 'class in (WINDOWS_WORKSTATION, WINDOWS_SERVER)'
+    status = 'Failed'
 }
+$QueryParamString = ConvertTo-QueryParamString -QueryParams $queryParams
 
-# Format the query parameters into a string (URL encoding)
-$QueryParamString = ($queryParams.GetEnumerator() | ForEach-Object { 
-    "$($_.Key)=$($_.Value -replace ' ', '%20')"
-}) -join '&'
-
-# Call Invoke-NinjaOneRequest using splatting
-$patchfailures = Invoke-NinjaOneRequest -Method GET -Path 'queries/os-patch-installs' -QueryParams $QueryParamString | Select-Object -ExpandProperty 'results'
-
-# Define query parameters for pending patches
-$queryParams = @{
-    df              = 'class in (WINDOWS_WORKSTATION, WINDOWS_SERVER)'
-    status          = 'Manual'
-}
-
-# Format the query parameters into a string (URL encoding)
-$QueryParamString = ($queryParams.GetEnumerator() | ForEach-Object { 
-    "$($_.Key)=$($_.Value -replace ' ', '%20')"
-}) -join '&'
-
-# Define query parameters for pending patches
-$queryParams = @{
-    df              = 'class in (WINDOWS_WORKSTATION, WINDOWS_SERVER)'
-    status          = 'Approved'
-}
-
-# Format the query parameters into a string (URL encoding)
-$QueryParamString = ($queryParams.GetEnumerator() | ForEach-Object { 
-    "$($_.Key)=$($_.Value -replace ' ', '%20')"
-}) -join '&'
+# Call Invoke-NinjaOneRequest with pagination to collect all results in large environments
+$patchfailuresResponse = Invoke-NinjaOneRequest -Method GET -Path 'queries/os-patch-installs' -QueryParams $QueryParamString -Paginate
+$patchfailures = if ($patchfailuresResponse.results) { $patchfailuresResponse.results } else { @($patchfailuresResponse | Select-Object -ExpandProperty 'results') }
 
 # Fetch activities with built-in pagination
 try {
     $queryParams2 = @{
-        df     = 'class in (WINDOWS_WORKSTATION, WINDOWS_SERVER)'
-        class  = 'DEVICE'
-        type   = 'PATCH_MANAGEMENT'
-        status = 'in (PATCH_MANAGEMENT_APPLY_PATCH_COMPLETED, PATCH_MANAGEMENT_SCAN_COMPLETED, PATCH_MANAGEMENT_FAILURE)'
-        after  = $FirstDayString
-        before = $LastDayString
+        df       = 'class in (WINDOWS_WORKSTATION, WINDOWS_SERVER)'
+        class    = 'DEVICE'
+        type     = 'PATCH_MANAGEMENT'
+        status   = 'in (PATCH_MANAGEMENT_APPLY_PATCH_COMPLETED, PATCH_MANAGEMENT_SCAN_COMPLETED, PATCH_MANAGEMENT_FAILURE)'
+        after    = $FirstDayString
+        before   = $LastDayString
         pageSize = 1000
     }
-    # Format the query parameters into a string
-    # Manually replace spaces with %20 for proper URL formatting
-    $QueryParamString2 = ($queryParams2.GetEnumerator() | ForEach-Object { 
-        "$($_.Key)=$($_.Value -replace ' ', '%20')"
-    }) -join '&'
+    $QueryParamString2 = ConvertTo-QueryParamString -QueryParams $queryParams2
     $allActivities = Invoke-NinjaOneRequest -Method GET -Path 'activities' -QueryParams $QueryParamString2 -Paginate
 
-# Step 1: Get the first day of the current month
-$firstDayOfCurrentMonth = Get-Date -Year (Get-Date).Year -Month (Get-Date).Month -Day 1
+# Filter activities using the report month window (not current month) so historical reports are correct
+$firstDayUnix = [System.DateTimeOffset]::new($FirstDayOfMonth).ToUnixTimeSeconds()
+$lastDayUnix = [System.DateTimeOffset]::new($LastDayOfMonth.AddHours(23).AddMinutes(59).AddSeconds(59)).ToUnixTimeSeconds()
 
-# Step 2: Convert the first day of the current month to Unix time (seconds since 1970)
-$firstDayUnix = [System.DateTimeOffset]::new($firstDayOfCurrentMonth).ToUnixTimeSeconds()
-
-# Step 3: Filter activities that occurred on or after the first day of the current month
 $filteredActivities = $allActivities.activities | Where-Object {
-    $_.activityTime -ge $firstDayUnix
+    $_.activityTime -ge $firstDayUnix -and $_.activityTime -le $lastDayUnix
 }
-
-# Now $filteredActivities contains only the activities that occurred on or after the first day of the current month
 
 # Convert Unix timestamps (in seconds) or DateTime to readable DateTime
 $userActivities = $filteredActivities | ForEach-Object {
     $_.activityTime = Convert-ActivityTime $_.activityTime
     $_
 }
+$categorized = Get-CategorizedPatchActivities -Activities $userActivities
+$patchScans = $categorized.PatchScans
+$patchScanFailures = $categorized.PatchScanFailures
+$patchApplicationCycles = $categorized.PatchApplicationCycles
+$patchApplicationFailures = $categorized.PatchApplicationFailures
 } catch {
     Write-Error "Failed to retrieve activities. Error: $_"
     exit
-}
-
-foreach ($activity in $userActivities) {
-    if ($activity.activityResult -match "SUCCESS") {
-        if ($activity.statusCode -match "PATCH_MANAGEMENT_SCAN_COMPLETED") {
-            $patchScans += $activity
-        } elseif ($activity.statusCode -match "PATCH_MANAGEMENT_APPLY_PATCH_COMPLETED") {
-            $patchApplicationCycles += $activity
-        }
-    } elseif ($activity.activityResult -match "FAILURE") {
-        if ($activity.statusCode -match "PATCH_MANAGEMENT_SCAN_COMPLETED") {
-            $patchScanFailures += $activity
-        } elseif ($activity.statusCode -match "PATCH_MANAGEMENT_APPLY_PATCH_COMPLETED") {
-            $patchApplicationFailures += $activity
-        }
-    }
 }
 
 # Index devices by ID for faster lookup
 $deviceIndex = @{}
 foreach ($device in $devices) {
     $deviceIndex[$device.id] = $device
+}
+
+# Index organizations by ID for faster lookup
+$organizationIndex = @{}
+foreach ($organization in $organizations) {
+    $organizationIndex[$organization.id] = $organization
 }
 
 # Initialize organization objects with tracked properties
@@ -277,7 +265,8 @@ foreach ($organization in $organizations) {
 
 # Assign devices to organizations
 foreach ($device in $devices) {
-    $currentOrg = $organizations | Where-Object { $_.id -eq $device.organizationId }
+    $currentOrg = $organizationIndex[$device.organizationId]
+    if (-not $currentOrg) { continue }
     if ($device.nodeClass.EndsWith("_SERVER")) {
         $currentOrg.Servers += $device.systemName
     } elseif ($device.nodeClass.EndsWith("_WORKSTATION") -or $device.nodeClass -eq "MAC") {
@@ -288,36 +277,44 @@ foreach ($device in $devices) {
 # Process patch scans
 foreach ($patchScan in $patchScans) {
     $device = $deviceIndex[$patchScan.deviceId]
+    if (-not $device) { continue }
+    $organization = $organizationIndex[$device.organizationId]
+    if (-not $organization) { continue }
     $patchScan | Add-Member -NotePropertyName "DeviceName" -NotePropertyValue $device.systemName -Force
     $patchScan | Add-Member -NotePropertyName "OrgID" -NotePropertyValue $device.organizationId -Force
-    $organization = $organizations | Where-Object { $_.id -eq $device.organizationId }
     $organization.PatchScans += $patchScan
 }
 
 # Process patch application/update cycles
 foreach ($patchApplicationCycle in $patchApplicationCycles) {
     $device = $deviceIndex[$patchApplicationCycle.deviceId]
+    if (-not $device) { continue }
+    $organization = $organizationIndex[$device.organizationId]
+    if (-not $organization) { continue }
     $patchApplicationCycle | Add-Member -NotePropertyName "DeviceName" -NotePropertyValue $device.systemName -Force
     $patchApplicationCycle | Add-Member -NotePropertyName "OrgID" -NotePropertyValue $device.organizationId -Force
-    $organization = $organizations | Where-Object { $_.id -eq $device.organizationId }
     $organization.PatchApplications += $patchApplicationCycle
 }
 
 # Process patch installations
 foreach ($patchinstall in $patchinstalls) {
     $device = $deviceIndex[$patchinstall.deviceId]
+    if (-not $device) { continue }
+    $organization = $organizationIndex[$device.organizationId]
+    if (-not $organization) { continue }
     $patchinstall | Add-Member -NotePropertyName "DeviceName" -NotePropertyValue $device.systemName -Force
     $patchinstall | Add-Member -NotePropertyName "OrgID" -NotePropertyValue $device.organizationId -Force
-    $organization = $organizations | Where-Object { $_.id -eq $device.organizationId }
     $organization.PatchInstalls += $patchinstall
 }
 
 # Process patch installation failures
 foreach ($patchfailure in $patchfailures) {
     $device = $deviceIndex[$patchfailure.deviceId]
+    if (-not $device) { continue }
+    $organization = $organizationIndex[$device.organizationId]
+    if (-not $organization) { continue }
     $patchfailure | Add-Member -NotePropertyName "DeviceName" -NotePropertyValue $device.systemName -Force
     $patchfailure | Add-Member -NotePropertyName "OrgID" -NotePropertyValue $device.organizationId -Force
-    $organization = $organizations | Where-Object { $_.id -eq $device.organizationId }
     $organization.PatchFailures += $patchfailure
 }
 
@@ -333,9 +330,13 @@ function ConvertTo-ObjectToHtmlTable {
         [string[]]$ExcludedProperties = @('RowColour','deviceId')
     )
 
+    if ($null -eq $Objects -or $Objects.Count -eq 0) {
+        return "<table class='table table-striped'><tbody><tr><td>No data</td></tr></tbody></table>"
+    }
+
     $html = "<table class='table table-striped'>"
     $html += "<thead><tr>"
-    
+
     # Exclude specified properties from the header
     foreach ($property in $Objects[0].PSObject.Properties.Name) {
         if (-not ($ExcludedProperties -contains $property)) {
@@ -415,7 +416,7 @@ if ($CreateKB -or $CreateDocument) {
     $DocTemplate = Invoke-NinjaOneDocumentTemplate $PatchReportTemplate
 
     # Fetch existing Patch Report Documents
-    $PatchReportDocs = Invoke-NinjaOneRequest -Method GET -Path 'organization/documents' -QueryParams "templateIds=$($DocTemplate.id)"
+    $PatchReportDocs = Invoke-NinjaOneRequest -Method GET -Path 'organization/documents' -QueryParams (ConvertTo-QueryParamString -QueryParams @{ templateIds = $DocTemplate.id })
 
     # Initialize lists for document updates and creations
     [System.Collections.Generic.List[PSCustomObject]]$NinjaDocUpdates = @()
@@ -460,11 +461,12 @@ if ($CreateKB -or $CreateDocument) {
             # Process each patch installation
             foreach ($install in $trackedUpdates) {
                 # Retrieve the corresponding device
-                $current_Device = $currentDevices | Where-Object { $_.id -eq $install.deviceId } | Select-Object -First 1
+                $current_Device = $deviceIndex[$install.deviceId]
+                if (-not $current_Device) { continue }
 
                 # Add new properties to the patch installation object
                 $install | Add-Member -MemberType NoteProperty -Name "DeviceName" -Value $current_Device.systemName -Force
-                
+
                 # Convert Unix timestamps to readable format
                 $install.installedAt = Convert-ActivityTime $install.installedAt
                 $install.timestamp = Convert-ActivityTime $install.timestamp
@@ -506,21 +508,21 @@ if ($CreateKB -or $CreateDocument) {
                     }
             
                     $MatchCount = ($MatchedDoc | Measure-Object).Count
-            
+
                     if ($MatchCount -eq 0) {
                         Write-Host "No match found for $($organization.name)"
                     } elseif ($MatchCount -gt 1) {
                         Throw "Multiple NinjaOne Documents ($($MatchedDoc.documentId -join ',')) matched to $($organization.name)"
-                        continue
                     } else {
+                        $MatchedDoc = @($MatchedDoc)[0]
                         Write-Host "Matched document ID: $($MatchedDoc.documentId) for $($organization.name)"
                     }
-            
+
                     $DocFields = @{
                         'patchDetails'      = @{'html' = $patchwidget }
                         'patchInstallations'  = @{'html' = $htmltable }
                     }
-            
+
                     if ($MatchedDoc) {
                         $UpdateObject = [PSCustomObject]@{
                             documentId   = $MatchedDoc.documentId
@@ -545,7 +547,7 @@ if ($CreateKB -or $CreateDocument) {
                     $MatchingName = "$($organization.name) Patch Installation Report - $currentMonth $currentYear"
 
                     # Fetch existing Patch Report KB Articles
-                    $PatchReportKBs = Invoke-NinjaOneRequest -Method GET -Path 'knowledgebase/organization/articles' -QueryParams "articleName=$($MatchingName)"
+                    $PatchReportKBs = Invoke-NinjaOneRequest -Method GET -Path 'knowledgebase/organization/articles' -QueryParams (ConvertTo-QueryParamString -QueryParams @{ articleName = $MatchingName })
                     
                     $KBMatchCount = ($PatchReportKBs | Measure-Object).Count
                     Write-Output "Found $($organization.name) had $($KBMatchCount) match"
@@ -557,8 +559,8 @@ if ($CreateKB -or $CreateDocument) {
                         Write-Host "No match found for $($MatchingName)"
                     } elseif ($KBMatchCount -gt 1) {
                         Throw "Multiple NinjaOne KBs with ($($PatchReportKBs.id -join ',')) matched to $($MatchingName)"
-                        continue
                     } else {
+                        $PatchReportKBs = @($PatchReportKBs)[0]
                         Write-Host "Matched document ID: $($PatchReportKBs.id) for $($MatchingName)"
                     }
 
@@ -641,7 +643,7 @@ if ($CreateGlobalKB) {
         }
 
         # Get the organization associated with the device
-        $organization = $organizations | Where-Object { $_.id -eq $device.organizationId }
+        $organization = $organizationIndex[$device.organizationId]
         if (-not $organization) {
             continue
         }
@@ -676,7 +678,7 @@ if ($CreateGlobalKB) {
     $GlobalMatchingName = "Patch Installation Report - $currentMonth $currentYear"
 
     # Fetch existing Patch Report KB Articles
-    $PatchReportKBs = Invoke-NinjaOneRequest -Method GET -Path 'knowledgebase/global/articles' -QueryParams "articleName=$($GlobalMatchingName)"
+    $PatchReportKBs = Invoke-NinjaOneRequest -Method GET -Path 'knowledgebase/global/articles' -QueryParams (ConvertTo-QueryParamString -QueryParams @{ articleName = $GlobalMatchingName })
 
     $MatchCount = ($PatchReportKBs | Measure-Object).Count
 
@@ -684,8 +686,8 @@ if ($CreateGlobalKB) {
         Write-Host "No match found for $($GlobalMatchingName)"
     } elseif ($MatchCount -gt 1) {
         Throw "Multiple NinjaOne KBs with ($($PatchReportKBs.documentId -join ',')) matched to $($GlobalMatchingName)"
-        continue
     } else {
+        $PatchReportKBs = @($PatchReportKBs)[0]
         Write-Host "Matched document ID: $($PatchReportKBs.Id) for $($GlobalMatchingName)"
     }
 

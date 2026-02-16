@@ -45,5 +45,20 @@ This PowerShell script generates a report of Windows device patch installations 
 | `globalOverview`       | Global Overview        | Checkbox |
 | `reportMonth`          | Report Month           | String |
 
+**Report Month** (`reportMonth`): Leave blank for the current month. For a specific month use full month name and year, e.g. `December 2024`. Historical reports use the correct date range for patch and activity data.
 
-![Patch Installations](https://github.com/jeffhunterninja/NinjaOne-Scripts/blob/main/Windows%20OS%20Patch%20Reporting/patchinstallations.png))
+
+![Patch Installations](https://github.com/jeffhunterninja/NinjaOne-Scripts/blob/main/Windows%20OS%20Patch%20Reporting/patchinstallations.png)
+
+---
+
+## Troubleshooting
+
+### Error: `NO_ALLOWED_DOCUMENT_TEMPLATE_FOUND`
+
+This error can occur when the **"Patch Installation Reports"** document template has been **archived** in NinjaOne. Archived templates are not allowed for creating or updating documents via the API.
+
+**To resolve:**
+
+- **Restore the template:** In NinjaOne, go to **Administration** → **Documentation** (or **API** → **API Documentation**), find the archived "Patch Installation Reports" template, and restore it.
+- **Or delete the archived template** so the script can create a fresh one on the next run (the script creates the template automatically if it doesn't exist).
