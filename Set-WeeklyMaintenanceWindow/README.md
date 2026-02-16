@@ -2,8 +2,8 @@
 
 This folder contains two scripts that work together:
 
-1. **Set-WeeklyMaintenanceWindow.ps1** – Sets weekly maintenance windows for organizations, locations, and devices in NinjaOne by importing values from a CSV via the NinjaOne API.
-2. **Check-WeeklyMaintenanceWindow.ps1** – Checks whether the device's current local time is within or outside a recurring weekly maintenance window (for use in NinjaOne compound conditions).
+1. **Set-WeeklyMaintenanceWindow.ps1** – Sets weekly maintenance windows for organizations, locations, and devices in NinjaOne by importing values from a CSV via the NinjaOne API. Run this locally on your workstation, or via an API server.
+2. **Check-WeeklyMaintenanceWindow.ps1** – Checks whether the device's current local time is within or outside a recurring weekly maintenance window (for use in NinjaOne compound conditions or with a pre-script).
 
 ---
 
@@ -57,7 +57,7 @@ With environment variables set:
 $env:NinjaOneInstance = "app.ninjarmm.com"
 $env:NinjaOneClientId = "your-client-id"
 $env:NinjaOneClientSecret = "your-client-secret"
-.\Set-WeeklyMaintenanceWindow.ps1 -CsvPath ".\Import-CustomFields-Example.csv"
+.\Set-WeeklyMaintenanceWindow.ps1 -CsvPath ".\Import-MaintenanceWindows-Example.csv"
 ```
 
 To clear existing values when a cell is empty:
@@ -68,7 +68,7 @@ To clear existing values when a cell is empty:
 
 ### Example CSV (weekly maintenance window)
 
-See `Import-CustomFields-Example.csv` for a sample that sets weekly maintenance windows:
+See `Import-MaintenanceWindows-Example.csv` for a sample that sets weekly maintenance windows:
 
 - **organization**: `name` = organization name; include columns like `maintenanceDay`, `maintenanceStart`, `maintenanceEnd` for org-level maintenance windows.
 - **location**: `name` = `"Acme Corp,Main Office"` (organization name, then location name, comma-separated); other columns are location-level custom fields (e.g. maintenance window).

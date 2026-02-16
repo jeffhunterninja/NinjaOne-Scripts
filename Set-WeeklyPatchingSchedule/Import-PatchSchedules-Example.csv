@@ -1,0 +1,4 @@
+level,name,patchingDay,patchingStart
+organization,Internal Infrastructure,Sunday,02:00
+location,"Internal Infrastructure,Main Office",Saturday,01:00
+device,DemoVM01,Tuesday,00:00

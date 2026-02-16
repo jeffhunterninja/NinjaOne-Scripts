@@ -7,14 +7,14 @@
     start time, and end time. Maintenance window values are read from NinjaOne custom fields, which
     are set by Set-WeeklyMaintenanceWindow.ps1. NinjaOne injects device/org/location custom fields
     (maintenanceDay, maintenanceStart, maintenanceEnd) as environment variables when this script runs.
-    Supports both HH:mm format and Unix milliseconds (as stored by Set-WeeklyMaintenanceWindow.ps1).
+    Supports HH:mm, seconds-from-midnight-UTC (0-86400; NinjaOne Time fields), and Unix milliseconds (as stored by Set-WeeklyMaintenanceWindow.ps1).
     Handles overnight windows (e.g. Sunday 22:00 - Monday 06:00). Intended for use with NinjaOne
     compound conditions.
 
     Environment variables (from NinjaOne custom fields):
     - maintenanceDay   : Day of week (e.g. Sunday, Monday).
-    - maintenanceStart: Start time as HH:mm (e.g. "02:00") or Unix milliseconds.
-    - maintenanceEnd  : End time as HH:mm (e.g. "04:00") or Unix milliseconds.
+    - maintenanceStart: Start time as HH:mm (e.g. "02:00"), seconds from midnight UTC (0-86400), or Unix milliseconds.
+    - maintenanceEnd  : End time as HH:mm (e.g. "04:00"), seconds from midnight UTC (0-86400), or Unix milliseconds.
     - exitWhenInside  : Optional. "true"/"1" = exit 0 when inside window (default); "false"/"0" = exit 0 when outside.
 
 .EXAMPLE
@@ -25,7 +25,7 @@
 $ErrorActionPreference = 'Stop'
 
 # Read maintenance window from NinjaOne custom fields (injected as environment variables)
-$MaintenanceDay   = Get-NinjaProperty maintenanceDay
+$MaintenanceDay   = Get-NinjaProperty maintenanceDay -type dropdown
 $MaintenanceStart = Get-NinjaProperty maintenanceStart
 $MaintenanceEnd   = Get-NinjaProperty maintenanceEnd
 
@@ -53,7 +53,7 @@ if ([string]::IsNullOrWhiteSpace($MaintenanceEnd)) {
 
 #endregion
 
-#region Parse maintenance window (Format A: HH:mm, Format B: Unix ms)
+#region Parse maintenance window (Format A: HH:mm, Format B: seconds from midnight UTC, Format C: Unix ms)
 
 function Get-DayOfWeekFromName {
     param([string]$DayName)
@@ -99,7 +99,22 @@ if ($MaintenanceStart -match '^(\d{1,2}):(\d{2})$' -and $MaintenanceEnd -match '
     }
     $windowEndTS = [TimeSpan]::new($h2, $m2, 0)
 }
-# Format B: Unix milliseconds
+# Format B: Seconds from midnight UTC (0-86400). NinjaOne "Time" custom fields use this.
+elseif ($MaintenanceStart -match '^\d+$' -and $MaintenanceEnd -match '^\d+$' `
+    -and [long]$MaintenanceStart -ge 0 -and [long]$MaintenanceStart -le 86400 `
+    -and [long]$MaintenanceEnd -ge 0 -and [long]$MaintenanceEnd -le 86400) {
+    $utcDate = [DateTime]::UtcNow.Date
+    $startLocal = [TimeZoneInfo]::ConvertTimeFromUtc($utcDate.AddSeconds([int]$MaintenanceStart), [TimeZoneInfo]::Local)
+    $endLocal   = [TimeZoneInfo]::ConvertTimeFromUtc($utcDate.AddSeconds([int]$MaintenanceEnd), [TimeZoneInfo]::Local)
+    $windowStartTS = $startLocal.TimeOfDay
+    $windowEndTS   = $endLocal.TimeOfDay
+    $targetDayOfWeek = Get-DayOfWeekFromName -DayName $MaintenanceDay
+    if ($null -eq $targetDayOfWeek) {
+        Write-Error "Invalid MaintenanceDay: '$MaintenanceDay'. Use Sunday, Monday, Tuesday, Wednesday, Thursday, Friday, or Saturday."
+        exit 2
+    }
+}
+# Format C: Unix milliseconds (e.g. from Set-WeeklyMaintenanceWindow.ps1 import)
 elseif ($MaintenanceStart -match '^\d+$' -and $MaintenanceEnd -match '^\d+$') {
     try {
         $startDt = [DateTimeOffset]::FromUnixTimeMilliseconds([long]$MaintenanceStart).LocalDateTime
@@ -108,12 +123,16 @@ elseif ($MaintenanceStart -match '^\d+$' -and $MaintenanceEnd -match '^\d+$') {
         Write-Error "Failed to parse MaintenanceStart or MaintenanceEnd as Unix milliseconds: $_"
         exit 2
     }
-    $targetDayOfWeek = $startDt.DayOfWeek
+    # Use maintenanceDay for target day; Unix ms may come from different scope (org) than maintenanceDay (device)
+    $targetDayOfWeek = Get-DayOfWeekFromName -DayName $MaintenanceDay
+    if ($null -eq $targetDayOfWeek) {
+        $targetDayOfWeek = $startDt.DayOfWeek
+    }
     $windowStartTS = $startDt.TimeOfDay
     $windowEndTS   = $endDt.TimeOfDay
 }
 else {
-    Write-Error "MaintenanceStart and MaintenanceEnd must both be HH:mm (e.g. 02:00) or both be Unix milliseconds."
+    Write-Error "MaintenanceStart and MaintenanceEnd must both be HH:mm (e.g. 02:00), seconds from midnight UTC (0-86400), or Unix milliseconds."
     exit 2
 }
 
