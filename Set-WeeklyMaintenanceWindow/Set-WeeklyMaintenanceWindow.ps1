@@ -26,7 +26,7 @@
     If not set, empty values are omitted from the update payload.
 
 .EXAMPLE
-    .\Import-NinjaOneCustomFieldsFromCsv.ps1 -CsvPath "C:\data\maintenance-windows.csv" -NinjaOneInstance "app.ninjarmm.com" -NinjaOneClientId "..." -NinjaOneClientSecret "..."
+    .\Set-WeeklyMaintenanceWindow.ps1 -CsvPath "C:\data\maintenance-windows.csv" -NinjaOneInstance "app.ninjarmm.com" -NinjaOneClientId "..." -NinjaOneClientSecret "..."
 #>
 
 
@@ -57,7 +57,7 @@ $script:FailedCount = 0
 #region Validation
 
 if ([string]::IsNullOrWhiteSpace($CsvPath)) {
-    Write-Error "CsvPath is required. Pass -CsvPath or set it in the temp config block."
+    Write-Error "CsvPath is required. Pass -CsvPath or set environment variables."
     exit 1
 }
 if (-not (Test-Path -LiteralPath $CsvPath)) {
