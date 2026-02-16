@@ -2,7 +2,7 @@
 <#
 .SYNOPSIS
   Per-user idle time while running as SYSTEM by launching a helper in each user session
-  that calls GetLastInputInfo and exits with idle seconds.
+  that calls GetLastInputInfo and exits with idle seconds. Writes idle time to NinjaOne custom fields.
 
 .EXIT CODES
   0 = OK (no threshold or idle < threshold)
@@ -17,7 +17,13 @@ param(
   [int]$PerProcessTimeoutSeconds = 10
 )
 
-$ThresholdMinutes = $env:thresholdminutes
+# NinjaOne script variable "Threshold Minutes" populates $env:thresholdminutes; use it when present and valid
+if ($null -ne $env:thresholdminutes -and -not [string]::IsNullOrWhiteSpace($env:thresholdminutes)) {
+  $parsed = 0
+  if ([int]::TryParse($env:thresholdminutes.Trim(), [ref]$parsed) -and $parsed -ge 0) {
+    $ThresholdMinutes = $parsed
+  }
+}
 
 function Test-IsElevated {
   $id = [System.Security.Principal.WindowsIdentity]::GetCurrent()
@@ -28,10 +34,10 @@ function Test-IsElevated {
 function Format-Minutes([int]$Minutes) {
   $ts = [TimeSpan]::FromMinutes([double]$Minutes)
   $parts = @()
-  if ($ts.Days)    { $parts += "$($ts.Days) day(s)" }
-  if ($ts.Hours)   { $parts += "$($ts.Hours) hour(s)" }
-  if ($ts.Minutes) { $parts += "$($ts.Minutes) minute(s)" }
-  if (-not $parts) { $parts = @('0 minute(s)') }
+  if ($ts.Days)    { $parts += "$($ts.Days) $(if ($ts.Days -eq 1) { 'day' } else { 'days' })" }
+  if ($ts.Hours)   { $parts += "$($ts.Hours) $(if ($ts.Hours -eq 1) { 'hour' } else { 'hours' })" }
+  if ($ts.Minutes) { $parts += "$($ts.Minutes) $(if ($ts.Minutes -eq 1) { 'minute' } else { 'minutes' })" }
+  if (-not $parts) { $parts = @('0 minutes') }
   $parts -join ', '
 }
 
@@ -249,8 +255,13 @@ public static class UserIdleHelper
             );
             if (!ok || pi.hProcess == IntPtr.Zero) return false;
 
-            // Wait
+            // Wait; only use exit code when process actually exited (not on timeout)
+            const uint WAIT_OBJECT_0 = 0;
+            const uint WAIT_TIMEOUT = 0x102;
             uint wait = WaitForSingleObject(pi.hProcess, (uint)timeoutMs);
+            if (wait == WAIT_TIMEOUT) return false;
+            if (wait != WAIT_OBJECT_0) return false;
+
             uint code;
             if (!GetExitCodeProcess(pi.hProcess, out code)) return false;
 
@@ -274,12 +285,17 @@ if (-not (Test-IsElevated)) {
   exit 1
 }
 
+if (-not (Get-Command Ninja-Property-Set -ErrorAction SilentlyContinue)) {
+  Write-Warning "Ninja-Property-Set cmdlet not found; NinjaOne custom fields will not be updated."
+}
+
 $timeoutMs = [Math]::Max(3000, $PerProcessTimeoutSeconds * 1000)
 
 # Build the tiny inline helper that runs INSIDE the user’s session:
 # - Adds GetLastInputInfo P/Invoke
 # - Computes idle milliseconds = Environment.TickCount - LastInputTime
 # - Exits with idle seconds as process exit code
+# - Note: Environment.TickCount wraps at ~49 days; idle may be wrong after long uptime (known limitation)
 $helperCmd = @'
 Add-Type @"
 using System;
@@ -315,6 +331,7 @@ $sessions = [UserIdleHelper]::ListSessions() | ForEach-Object {
     State      = $_.State
   }
 }
+Write-Verbose "Enumerated $($sessions.Count) session(s)."
 
 # Optional filter for display (does not affect measurement)
 $quserRows = Get-QueryUser
@@ -325,7 +342,7 @@ if ($UserName -and $quserRows) {
 }
 
 # 2) For every session in a connected/active-ish state, run helper and capture exit code (idle seconds)
-$measured = @()
+$measured = [System.Collections.Generic.List[object]]::new()
 foreach ($s in $sessions) {
   # We’ll try for Active/Connected/Idle states (you can loosen this if needed)
   if ($s.State -in @('WTSActive','WTSConnected','WTSIdle')) {
@@ -336,18 +353,19 @@ foreach ($s in $sessions) {
     }
 
     $exit = -1
+    Write-Verbose "Measuring session $($s.SessionId) ($($s.WinStation), $($s.State))."
     $ok = [UserIdleHelper]::RunInSessionAndGetExitCode([int]$s.SessionId, $psLine, $timeoutMs, [ref]$exit)
     $idleSec = if ($ok -and $exit -ge 0) { [int]$exit } else { $null }
     $idleMin = if ($idleSec -ne $null) { [int][Math]::Floor($idleSec / 60.0) } else { $null }
 
-    $measured += [PSCustomObject]@{
+    $measured.Add([PSCustomObject]@{
       SessionId     = $s.SessionId
       WinStation    = $s.WinStation
       State         = $s.State
       IdleSeconds   = $idleSec
       IdleMinutes   = $idleMin
       MeasuredVia   = if ($idleSec -ne $null) { 'CreateProcessAsUser:GetLastInputInfo' } else { 'Failed' }
-    }
+    })
   }
 }
 
@@ -383,20 +401,22 @@ $eval = $null
 $console = $measured | Where-Object { $_.WinStation -match '^(Console|console)$' -and $_.IdleMinutes -ne $null } | Select-Object -First 1
 if ($console) {
   $eval = $console
+  Write-Verbose "Evaluated session: Console (SessionId $($eval.SessionId), IdleMinutes $($eval.IdleMinutes))."
 } else {
   $active = $measured | Where-Object { $_.State -eq 'WTSActive' -and $_.IdleMinutes -ne $null } | Sort-Object IdleMinutes -Descending | Select-Object -First 1
-  if ($active) { $eval = $active } else {
+  if ($active) { $eval = $active; Write-Verbose "Evaluated session: most-idle Active (SessionId $($eval.SessionId), IdleMinutes $($eval.IdleMinutes))." } else {
     $any = $measured | Where-Object { $_.IdleMinutes -ne $null } | Sort-Object IdleMinutes -Descending | Select-Object -First 1
-    if ($any) { $eval = $any }
+    if ($any) { $eval = $any; Write-Verbose "Evaluated session: fallback (SessionId $($eval.SessionId), IdleMinutes $($eval.IdleMinutes))." }
   }
 }
+if (-not $eval) { Write-Verbose "No session measured; using SYSTEM fallback (0 minutes)." }
 
 # If still nothing, report SYSTEM fallback (rare; e.g., no active sessions)
 $usedFallback = $false
 if (-not $eval) {
   $usedFallback = $true
   $idleMin = 0
-  $friendly = '0 minute(s)'
+  $friendly = '0 minutes'
 } else {
   $idleMin = [int]$eval.IdleMinutes
   $friendly = Format-Minutes $idleMin
@@ -404,7 +424,7 @@ if (-not $eval) {
 
 # 5) Optional: write to NinjaOne CFs
 try { Ninja-Property-Set idleTime $friendly } catch {}
-try { Ninja-PRoperty-Set idleTimeStatus $idleMin } catch {}
+try { Ninja-Property-Set idleTimeStatus $idleMin } catch {}
 
 # 6) Summary
 $summary = [PSCustomObject]@{
@@ -425,7 +445,7 @@ $null = ($summary | Format-List * | Out-String) | ForEach-Object { Write-Host $_
 # 7) Exit
 if ($ThresholdMinutes -gt 0 -and $idleMin -ge $ThresholdMinutes) {
   try { Ninja-Property-Set idleTimeStatus "ALERT: Idle $idleMin min (>= $ThresholdMinutes)" } catch {}
-  Write-Error "Idle time threshold exceeded: $idleMin minute(s) (threshold: $ThresholdMinutes)."
+  Write-Error "Idle time threshold exceeded: $idleMin minutes (threshold: $ThresholdMinutes)."
   exit 2
 }
 exit 0

@@ -57,7 +57,7 @@ Two custom fields are updated:
 
 | Field | Type | Example Value | Description |
 |--------|------|----------------|--------------|
-| `idleTime` | Text | `1 hour(s), 20 minute(s)` | Human-readable idle duration |
+| `idleTime` | Text | `1 hour, 20 minutes` | Human-readable idle duration |
 | `idleTimeStatus` | Text | `ALERT: Idle 85 min (>= 60)` or `85` | Numeric minutes or alert text |
 
 ### 5. Threshold Handling
@@ -73,11 +73,8 @@ If a threshold is defined (`ThresholdMinutes` or `thresholdminutes` env var):
 
 ## 🔧 Parameters and Environment Variables
 
-Create a Script Form Variable called "Threshold Minutes" if you want to specifiy a certain timeframe that will constitute an idle device.
-
-```powershell
-$ThresholdMinutes = $env:thresholdminutes
-```
+- **ThresholdMinutes** (parameter, default `0`): Idle threshold in minutes; exit code 2 when idle ≥ this value.
+- **NinjaOne:** Create a Script Form Variable called "Threshold Minutes" (integer) to set the threshold; the script reads `$env:thresholdminutes` and uses it only when present and a valid non-negative integer. Otherwise the parameter default (or value passed to the script) is used.
 
 ---
 
@@ -117,7 +114,7 @@ Set a script variable in the script called "Threshold Minutes" that uses the "In
 === Summary ===
 ComputerName       : DESKTOP123
 IdleMinutes        : 38
-IdleTime           : 38 minute(s)
+IdleTime           : 38 minutes
 ThresholdMinutes   : 0
 ThresholdExceeded  : False
 UsedFallback       : False
@@ -125,7 +122,7 @@ UsedFallback       : False
 
 Custom Fields:
 ```
-idleTime: 38 minute(s)
+idleTime: 38 minutes
 idleTimeStatus: 38
 Exit Code: 0
 ```
@@ -134,12 +131,12 @@ Exit Code: 0
 
 ### Example 2 — Threshold Exceeded
 ```
-Idle time threshold exceeded: 85 minute(s) (threshold: 60).
+Idle time threshold exceeded: 85 minutes (threshold: 60).
 ```
 
 Custom Fields:
 ```
-idleTime: 1 hour(s), 25 minute(s)
+idleTime: 1 hour, 25 minutes
 idleTimeStatus: ALERT: Idle 85 min (>= 60)
 Exit Code: 2
 ```
@@ -151,10 +148,10 @@ Exit Code: 2
 | Issue | Likely Cause | Solution |
 |--------|--------------|-----------|
 | `Access Denied` / Exit Code 1 | Script not elevated | Run as **SYSTEM** |
-| `(No sessions measured or all failed)` | No interactive users | Confirm a user is logged in |
-| Idle time incorrect | Different session evaluated | Check per-session table |
-| Threshold ignored | Env var override | Remove or update `thresholdminutes` |
-| Custom fields not updating | CFs missing or misnamed | Verify exact field names |
+| `(No sessions measured or all failed)` | No interactive users or helper timed out | Confirm a user is logged in; increase `PerProcessTimeoutSeconds` if sessions are slow |
+| Idle time incorrect | Different session evaluated | Check per-session table; run with `-Verbose` to see which session was evaluated |
+| Threshold ignored | Env not set or invalid | Set NinjaOne script variable "Threshold Minutes" (integer); param default is used when env is missing |
+| Custom fields not updating | CFs missing, misnamed, or cmdlet absent | Verify exact field names; script warns if `Ninja-Property-Set` is not available |
 
 ---
 
@@ -164,8 +161,9 @@ Exit Code: 2
 - **Session Management:** Via `WTSEnumerateSessions` and `CreateProcessAsUser`.
 - **Supported States:** `WTSActive`, `WTSConnected`, `WTSIdle`.
 - **Run Context:** Must be **SYSTEM** to access other sessions.
-- **TickCount Handling:** Uses unsigned arithmetic to avoid overflow.
+- **TickCount Handling:** Uses unsigned arithmetic; wraps at ~49 days (idle may be wrong after long uptime).
 - **Error Handling:** All `Ninja-Property-Set` calls wrapped in `try/catch`.
+- **`query user`:** Used for reference/display only; column headers are localized—parsing may fail on non-English Windows.
 
 ---
 
