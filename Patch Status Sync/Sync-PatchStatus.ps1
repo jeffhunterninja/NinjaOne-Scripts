@@ -1,3 +1,26 @@
+#Requires -Version 5.1
+<#
+.SYNOPSIS
+  Syncs NinjaOne patch status (pending, approved, failed) from the API into device custom fields.
+
+.DESCRIPTION
+  Retrieves patch data from NinjaOne API queries, compares with device custom fields
+  pendingPatches, approvedPatches, and failedPatches, and updates or clears them. Clears
+  stale values when a device no longer has patches in a category. Intended for scheduled
+  runs (e.g. hourly) from an API server or automation host. Requires NinjaOneDocs module
+  and credentials from NinjaOne custom properties.
+
+.EXIT CODES
+  0 = Success
+  1 = Missing credentials or PowerShell 7 / module failure
+  2 = API connect or request error
+#>
+
+[CmdletBinding()]
+param()
+
+$ErrorActionPreference = 'Stop'
+
 # Check for required PowerShell version (7+)
 if (!($PSVersionTable.PSVersion.Major -ge 7)) {
     try {
@@ -30,7 +53,7 @@ try {
 }
 catch {
     Write-Error "Failed to import NinjaOneDocs module. Error: $_"
-    exit
+    exit 2
 }
 
 # Your NinjaRMM credentials - these should be stored in secure NinjaOne custom fields
@@ -38,7 +61,7 @@ $NinjaOneInstance = Ninja-Property-Get ninjaoneInstance
 $NinjaOneClientId = Ninja-Property-Get ninjaoneClientId
 $NinjaOneClientSecret = Ninja-Property-Get ninjaoneClientSecret
 
-if (!$ninjaoneInstance -and !$NinjaOneClientId -and !$NinjaOneClientSecret) {
+if (!$NinjaOneInstance -and !$NinjaOneClientId -and !$NinjaOneClientSecret) {
     Write-Output "Missing required API credentials"
     exit 1
 }
@@ -49,7 +72,7 @@ try {
 }
 catch {
     Write-Error "Failed to connect to NinjaOne API. Error: $_"
-    exit
+    exit 2
 }
 
 function Compare-And-UpdateCustomFields {
@@ -61,7 +84,7 @@ function Compare-And-UpdateCustomFields {
     try {
         $currentFields = Invoke-NinjaOneRequest -Method GET -Path "device/$deviceId/custom-fields"
         $currentValue = $currentFields."$fieldName"
-        Write-Output "Retrieved value of $currentValue"
+        Write-Verbose "Retrieved value of $currentValue"
     } catch {
         Write-Warning "Failed to retrieve custom fields for device ID $deviceId. Error: $_"
         return
@@ -89,17 +112,6 @@ function Compare-And-UpdateCustomFields {
 $pendingCF = "pendingPatches"
 $approvedCF = "approvedPatches"
 $failedCF = "failedPatches"
-
-# Fetch devices and organizations using module functions
-try {
-    $devices = Invoke-NinjaOneRequest -Method GET -Path 'devices-detailed' -QueryParams "df=class%20in%20(WINDOWS_WORKSTATION,%20WINDOWS_SERVER)"
-    $organizations = Invoke-NinjaOneRequest -Method GET -Path 'organizations'
-
-}
-catch {
-    Write-Error "Failed to retrieve devices or organizations. Error: $_"
-    exit
-}
 
 # Define query parameters for patch installations
 $queryParams = @{
@@ -199,7 +211,7 @@ foreach ($group in $groupedpending) {
 
     # Convert updates to JSON string for comparison
     $newValue = ($updatesForDevice | ForEach-Object { $_.name }) -join ","
-    Compare-And-UpdateCustomFields -instance $NinjaOneInstance -deviceId $deviceId -fieldName "pendingPatches" -newValue $newValue
+    Compare-And-UpdateCustomFields -deviceId $deviceId -fieldName "pendingPatches" -newValue $newValue
 }
 
 foreach ($group in $groupedfailed) {
@@ -208,7 +220,7 @@ foreach ($group in $groupedfailed) {
 
     # Convert updates to JSON string for comparison
     $newValue = ($updatesForDevice | ForEach-Object { $_.name }) -join ","
-    Compare-And-UpdateCustomFields -instance $NinjaOneInstance -deviceId $deviceId -fieldName "failedPatches" -newValue $newValue
+    Compare-And-UpdateCustomFields -deviceId $deviceId -fieldName "failedPatches" -newValue $newValue
 }
 
 foreach ($group in $groupedapproved) {
@@ -217,7 +229,7 @@ foreach ($group in $groupedapproved) {
 
     # Convert updates to JSON string for comparison
     $newValue = ($updatesForDevice | ForEach-Object { $_.name }) -join ","
-    Compare-And-UpdateCustomFields -instance $NinjaOneInstance -deviceId $deviceId -fieldName "approvedPatches" -newValue $newValue
+    Compare-And-UpdateCustomFields -deviceId $deviceId -fieldName "approvedPatches" -newValue $newValue
 }
 
 
@@ -234,7 +246,7 @@ $groupedapproved | ForEach-Object  { $ApprovedDeviceIds[[string]$_.Name]  = $tru
 foreach ($cf in $pendingcustomfields) {
     # Convert deviceId to string to match the keys in the hashtable
     $deviceId = [string]$cf.deviceId
-    $currentPending = $cf.fields.value
+    $currentPending = $cf.pendingPatches
 
     # If there's data in pendingPatches but the device isn't in the current $groupedpending list, it's stale
     if ([string]::IsNullOrWhiteSpace($currentPending) -eq $false -and -not $PendingDeviceIds.ContainsKey($deviceId)) {
@@ -267,3 +279,5 @@ foreach ($cf in $approvedcustomfields) {
         Compare-And-UpdateCustomFields -deviceId $deviceId -fieldName "approvedPatches" -newValue ""
     }
 }
+
+exit 0

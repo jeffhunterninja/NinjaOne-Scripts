@@ -4,6 +4,16 @@
 
 This PowerShell script retrieves patch status information (pending, failed, and approved patches) from the NinjaOne  API and updates corresponding custom fields on devices within the NinjaOne platform. It ensures that the custom fields `pendingPatches`, `approvedPatches`, and `failedPatches` always reflect the current state of each device's patching. Recommend running this once per hour. Only values that have changed will be modified.
 
+**Run context:** This script is intended to run from a **central API server or automation host** (e.g. a scheduled task or automation runner that can call the NinjaOne API). It is not a device script and should not be deployed to run on each managed endpoint.
+
+## Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | Success |
+| `1` | Missing credentials or PowerShell 7 / module failure |
+| `2` | API connect or request error |
+
 ## Prerequisites
 
 1. **PowerShell 7+**:  
