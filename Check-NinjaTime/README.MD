@@ -4,6 +4,15 @@ This document outlines the configurable script variables used to define scheduli
 
 ---
 
+## Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| `1` | Condition met (within window or at target time; NinjaOne triggers linked automation) |
+| `2` | Condition not met (outside window, too far from target, or validation/parse error) |
+
+---
+
 ## 📋 Script Variables Overview
 
 | Variable                  | Used For                  | Type      | Notes                                                                 |
@@ -16,6 +25,7 @@ This document outlines the configurable script variables used to define scheduli
 | `Window Start`           | Start of window            | DATETIME  | Time only used                                                       |
 | `Window End`             | End of window              | DATETIME  | Time only used                                                       |
 | `Window Day of Week`     | Weekly window mode         | TEXT      | Required if `Window Recurrence` is `Weekly`; comma-separated         |
+| `Time Window Minutes`    | Grace period (minutes)     | INTEGER   | Optional. Set to interval + 1 (e.g., 16 for 15-min interval). Default 5. |
 
 ---
 
@@ -50,9 +60,10 @@ This document outlines the configurable script variables used to define scheduli
 
 It is not recommended to use "When no longer" for any mode - only use time-based resets.
 
-For any mode, it's important to adjust the $TimeWindowMinutes variable in the script to be in sync with your interval and script timeout. For example, if I'm running my compound condition every 15 minutes, I would set my $TimeWindowMinutes to 16 minutes. This allows the script to sleep until the desired $TargetTime is reached. I need to ensure that the timeout for the script exceeds my $TimeWindowMinutes - so in my case I would make it 17 minutes.
--Script interval
--$TimeWindowMinutes = interval + 1 minute
--Script timeout = interval + 2 minutes
+For any mode, set the `Time Window Minutes` script variable (or `timeWindowMinutes` env var) to be in sync with your interval and script timeout. For example, if you run the compound condition every 15 minutes, set `Time Window Minutes` to 16. This allows the script to sleep until the desired target time is reached. Ensure the script timeout exceeds `TimeWindowMinutes` (e.g., 17 minutes for a 15-minute interval).
+
+- Script interval
+- TimeWindowMinutes = interval + 1 minute
+- Script timeout = interval + 2 minutes
 
 When using Window mode, it also becomes important to ensure the auto-reset is longer than the maintenance window - i.e. a 4 hour maintenance window should have a 4 hour or longer auto-reset time. If the reset is too short, the automation could potentially trigger again if there is not an adequate state change monitor as a part of the compound condition.
