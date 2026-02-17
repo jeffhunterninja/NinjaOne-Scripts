@@ -45,10 +45,11 @@ try {
         exit 2
     }
 
-    # Get currently assigned tags from NinjaOne; ensure array form
-    $currentTags = @(Get-NinjaTag)
+    # Get currently assigned tags from NinjaOne; filter nulls and ensure array form
+    # (@($null) creates a one-element array that can be truthy in some contexts; filter defensively)
+    $currentTags = @(Get-NinjaTag | Where-Object { $null -ne $_ })
 
-    if (-not $currentTags) {
+    if ($currentTags.Count -eq 0) {
         Write-Error "Unable to retrieve current tags."
         exit 2
     }
