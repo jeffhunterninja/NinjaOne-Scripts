@@ -46,7 +46,7 @@ $driverNames  = $printers | ForEach-Object { $_.DriverName } | Where-Object { $_
 
 try {
     Ninja-Property-Set "printers"       ($printerNames -join "`r`n")
-    Ninja-Property-Set "printerdrivers" ($driverNames  -join "`r`n")
+    Ninja-Property-Set "printerDrivers" ($driverNames  -join "`r`n")
 }
 catch {
     Write-Error "Could not write to NinjaOne custom fields: $_"
