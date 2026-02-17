@@ -1,24 +1,33 @@
-#Run as current logged on user
+#Requires -Version 5.1
+<#
+.SYNOPSIS
+  Collects printer data in user context and writes to a temp file for the SYSTEM script to consume.
 
-$filePath   = "C:\temp\printer_info.json"
-$folderPath = "C:\temp"
+.DESCRIPTION
+  Runs as the current logged-on user to capture per-user (HKCU) and machine-wide (HKLM) printers
+  via Get-Printer. Writes results to C:\Windows\Temp for the companion SYSTEM script to read.
+  Designed to run at user login, immediately before the Custom Field Update script.
 
-# Check if the folder path exists
-if (Test-Path -Path $folderPath -PathType Container) {
+.EXIT CODES
+  0 = Success
+  2 = Error (Get-Printer failure, write failure)
+#>
 
-    # Collect printer information
+[CmdletBinding()]
+param()
+
+$ErrorActionPreference = 'Stop'
+
+$filePath = Join-Path $env:SystemRoot "Temp\printer_info.json"
+
+try {
     $printers = Get-Printer |
         Select-Object Name, DriverName
 
-    # Write JSON to disk (UTF-8 for compatibility)
-    $printers |
-        ConvertTo-Json -Depth 2 |
-        Out-File -FilePath $filePath -Encoding UTF8 -Force
-
-    # Wait 60 seconds to allow the SYSTEM script to consume the file
-    Start-Sleep -Seconds 60
+    $json = $printers | ConvertTo-Json -Depth 2 -Compress
+    [System.IO.File]::WriteAllText($filePath, $json, [System.Text.UTF8Encoding]::new($false))
 }
-else {
-    Write-Error "Folder path does not exist. Script cannot continue."
-    throw
+catch {
+    Write-Error "Failed to collect or write printer data: $_"
+    exit 2
 }

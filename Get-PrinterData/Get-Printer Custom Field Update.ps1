@@ -1,18 +1,38 @@
-# Run as System
+#Requires -Version 5.1
+<#
+.SYNOPSIS
+  Reads printer data from temp file and writes to NinjaOne custom fields.
 
-$filePath = "C:\temp\printer_info.json"
+.DESCRIPTION
+  Runs as SYSTEM to update NinjaOne custom fields (requires elevated context).
+  Reads JSON written by the User Printer Collection script, normalizes the data,
+  and populates the printers and printerdrivers custom fields.
+
+.EXIT CODES
+  0 = Success
+  1 = No data (file missing or empty)
+  2 = Error (parse failure, Ninja-Property-Set failure)
+#>
+
+[CmdletBinding()]
+param()
+
+$ErrorActionPreference = 'Stop'
+
+$filePath = Join-Path $env:SystemRoot "Temp\printer_info.json"
 
 if (-not (Test-Path -Path $filePath -PathType Leaf)) {
-    Write-Host "Could not find json file at $filePath, exiting script"
-    throw
+    Write-Host "Printer data file not found at $filePath. User collection script may not have run."
+    exit 1
 }
 
 try {
-    $printers = Get-Content -Raw -Path $filePath | ConvertFrom-Json
+    $raw = Get-Content -Raw -Path $filePath
+    $printers = $raw | ConvertFrom-Json
 }
 catch {
-    Write-Host "Could not retrieve/parse data from json file at $filePath"
-    throw
+    Write-Error "Could not parse printer data from $filePath : $_"
+    exit 2
 }
 
 # Normalize to an array (ConvertFrom-Json returns a PSCustomObject for single item)
@@ -29,6 +49,17 @@ try {
     Ninja-Property-Set "printerdrivers" ($driverNames  -join "`r`n")
 }
 catch {
-    Write-Host "Could not write into custom field(s)"
-    throw
+    Write-Error "Could not write to NinjaOne custom fields: $_"
+    exit 2
 }
+
+# Clean up temp file
+try {
+    Remove-Item -Path $filePath -Force -ErrorAction SilentlyContinue
+}
+catch {
+    # Non-fatal; log and continue
+    Write-Verbose "Could not remove temp file: $_"
+}
+
+exit 0
