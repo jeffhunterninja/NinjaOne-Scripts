@@ -343,7 +343,7 @@ $driverValues  = $driverNames  -join "`r`n"
 try {
   if (Get-Command Set-NinjaProperty -ErrorAction SilentlyContinue) {
     Set-NinjaProperty "printers"       $printerValues
-    Set-NinjaProperty "printerdrivers" $driverValues
+    Set-NinjaProperty "printerDrivers" $driverValues
   }
 } catch {
   Write-Error "Could not write to NinjaOne custom fields: $_"

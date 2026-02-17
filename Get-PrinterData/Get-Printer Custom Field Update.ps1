@@ -6,7 +6,7 @@
 .DESCRIPTION
   Runs as SYSTEM to update NinjaOne custom fields (requires elevated context).
   Reads JSON written by the User Printer Collection script, normalizes the data,
-  and populates the printers and printerdrivers custom fields.
+  and populates the printers and printerDrivers custom fields.
 
 .EXIT CODES
   0 = Success

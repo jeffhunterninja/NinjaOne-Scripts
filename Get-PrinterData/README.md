@@ -12,7 +12,7 @@ two approaches are available: a **single-script CreateProcessAsUser** method (re
 
 ### Custom Fields
 
-Only the `printers` custom field is required - `printerdrivers` is optional depending on how you'd like to view the information.
+Only the `printers` custom field is required - `printerDrivers` is optional depending on how you'd like to view the information.
 
 | Field Name       | Type      | Scope  | Purpose                  |
 |------------------|-----------|--------|--------------------------|
