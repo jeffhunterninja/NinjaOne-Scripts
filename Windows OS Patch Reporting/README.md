@@ -23,6 +23,37 @@ This PowerShell script generates a report of Windows device patch installations 
 - Microsoft Defender Updates are excluded from this report
 ---
 
+## **CSV Export Script: Export-WindowsPatchReportToCsv.ps1**
+
+A companion script that uses the **same patch data** (one line per KB per device) as `Publish-WindowsPatchReport.ps1` but exports to CSV instead of NinjaOne Documents or Knowledge Base. Use it when you need the report in a spreadsheet or for external processing.
+
+**Parameters:**
+
+| Parameter | Description |
+|-----------|-------------|
+| `-ReportMonth` | Optional. Month and year for the report (e.g. `"December 2024"`). Omit for the current month. |
+| `-OutputPath` | Optional. Full path for the CSV file. If omitted, writes `WindowsPatchReport_<YYYYMM>.csv` in the current directory. |
+| `-PerOrganization` | Optional switch. When set, writes one CSV per organization (e.g. `WindowsPatchReport_<OrgName>_<YYYYMM>.csv`) instead of a single combined file. |
+
+**CSV columns:** OrganizationName, DeviceName, PatchName, KBNumber, InstalledAt, Timestamp, DeviceId.
+
+**Example:**
+
+```powershell
+# Current month, single CSV in current directory
+.\Export-WindowsPatchReportToCsv.ps1
+
+# Specific month, custom path
+.\Export-WindowsPatchReportToCsv.ps1 -ReportMonth "December 2024" -OutputPath "C:\Reports\patches.csv"
+
+# One CSV per organization
+.\Export-WindowsPatchReportToCsv.ps1 -ReportMonth "January 2025" -PerOrganization
+```
+
+Credentials and prerequisites are the same as for `Publish-WindowsPatchReport.ps1` (NinjaOne API credentials, PowerShell 7+, NinjaOneDocs module). NinjaOne Documentation does not need to be enabled for the CSV export script.
+
+---
+
 ## Prerequisites
 
 1. **Set Up an API Server/Automated Documentation Server**
@@ -63,37 +94,6 @@ This error can occur when the **"Patch Installation Reports"** document template
 
 - **Restore the template:** In NinjaOne, go to **Administration** → **Documentation** (or **API** → **API Documentation**), find the archived "Patch Installation Reports" template, and restore it.
 - **Or delete the archived template** so the script can create a fresh one on the next run (the script creates the template automatically if it doesn't exist).
-
----
-
-## **CSV Export Script: Export-WindowsPatchReportToCsv.ps1**
-
-A companion script that uses the **same patch data** (one line per KB per device) as `Publish-WindowsPatchReport.ps1` but exports to CSV instead of NinjaOne Documents or Knowledge Base. Use it when you need the report in a spreadsheet or for external processing.
-
-**Parameters:**
-
-| Parameter | Description |
-|-----------|-------------|
-| `-ReportMonth` | Optional. Month and year for the report (e.g. `"December 2024"`). Omit for the current month. |
-| `-OutputPath` | Optional. Full path for the CSV file. If omitted, writes `WindowsPatchReport_<YYYYMM>.csv` in the current directory. |
-| `-PerOrganization` | Optional switch. When set, writes one CSV per organization (e.g. `WindowsPatchReport_<OrgName>_<YYYYMM>.csv`) instead of a single combined file. |
-
-**CSV columns:** OrganizationName, DeviceName, PatchName, KBNumber, InstalledAt, Timestamp, DeviceId.
-
-**Example:**
-
-```powershell
-# Current month, single CSV in current directory
-.\Export-WindowsPatchReportToCsv.ps1
-
-# Specific month, custom path
-.\Export-WindowsPatchReportToCsv.ps1 -ReportMonth "December 2024" -OutputPath "C:\Reports\patches.csv"
-
-# One CSV per organization
-.\Export-WindowsPatchReportToCsv.ps1 -ReportMonth "January 2025" -PerOrganization
-```
-
-Credentials and prerequisites are the same as for `Publish-WindowsPatchReport.ps1` (NinjaOne API credentials, PowerShell 7+, NinjaOneDocs module). NinjaOne Documentation does not need to be enabled for the CSV export script.
 
 ---
 
