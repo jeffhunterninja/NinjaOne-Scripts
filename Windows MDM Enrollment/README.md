@@ -6,6 +6,8 @@ This PowerShell script determines if a Windows device is MDM-enrolled and identi
 
 **Run context:** This is a **device script** intended to run on each managed Windows endpoint (e.g. via NinjaOne script deployment). It does not call the NinjaOne API; it runs locally on the device.
 
+**dsregcmd parsing:** The script reads MDM-related fields from `dsregcmd /status` using case-insensitive and variant-tolerant label matching (e.g. `MdmUrl` or `MDMUrl`, `MDMUserUPN` or `MDM User UPN`) so behavior is robust across Windows versions and builds.
+
 ## Exit Codes
 
 | Code | Meaning |
@@ -60,3 +62,8 @@ The script attempts to identify common MDM platforms from URLs and provider meta
 - 42Gears SureMDM
 
 If no match is found, `VendorGuess` is null and fallback values (ProviderID, ProviderName, MDMUrl) are used for the NinjaOne `mdmProvider` field.
+
+## Detection details
+
+- **EnrollmentType:** The script exposes `EnrollmentType` from the enrollment registry (user vs device) in the summary object when available.
+- **Multiple enrollments:** When more than one enrollment exists (e.g. Intune and another MDM), the script prefers the Microsoft Intune enrollment for URL, ProviderID, and ProviderName so `VendorGuess` and `mdmProvider` are stable and Intune is reported when present.

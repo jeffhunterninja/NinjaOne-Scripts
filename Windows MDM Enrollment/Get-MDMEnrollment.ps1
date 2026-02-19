@@ -49,12 +49,20 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 function Get-FirstLineValue {
-    param([string]$Text, [string]$Label)
+    param(
+        [string]$Text,
+        [string]$Label,
+        [string[]]$Labels
+    )
     if (-not $Text) { return $null }
-    $pattern = "^\s*$([regex]::Escape($Label))\s*:\s*(.+?)\s*$"
+    $toTry = if ($Labels -and $Labels.Count -gt 0) { $Labels } else { @($Label) }
     foreach ($line in $Text -split "`r?`n") {
-        $m = [regex]::Match($line, $pattern)
-        if ($m.Success) { return $m.Groups[1].Value.Trim() }
+        foreach ($l in $toTry) {
+            if ([string]::IsNullOrWhiteSpace($l)) { continue }
+            $pattern = "^\s*(?i:$([regex]::Escape($l)))\s*:\s*(.+?)\s*$"
+            $m = [regex]::Match($line, $pattern)
+            if ($m.Success) { return $m.Groups[1].Value.Trim() }
+        }
     }
     return $null
 }
@@ -83,8 +91,8 @@ function Get-DsRegInfo {
     [pscustomobject]@{
         Raw         = $out
         AADJoined   = (Get-FirstLineValue -Text $out -Label 'AzureAdJoined')
-        MDMUrl      = (Get-FirstLineValue -Text $out -Label 'MDMUrl')
-        MDMUserUPN  = (Get-FirstLineValue -Text $out -Label 'MDMUserUPN')
+        MDMUrl      = (Get-FirstLineValue -Text $out -Labels @('MdmUrl', 'MDMUrl'))
+        MDMUserUPN  = (Get-FirstLineValue -Text $out -Labels @('MDMUserUPN', 'MDM User UPN'))
     }
 }
 
@@ -158,8 +166,18 @@ function Get-MdmEnrollment {
     $enr  = @(Get-EnrollmentRegInfo)
     $oma  = @(Get-OmadmAccountsInfo)
 
-    # Best available URL source
+    # Prefer Intune enrollment when multiple exist so VendorGuess and mdmProvider are stable
+    $intuneEnr = $enr | Where-Object {
+        (Guess-MdmVendor -Url $_.MdmEnrollmentUrl -ProviderId $_.ProviderID -ProviderName $_.ProviderName) -eq 'Microsoft Intune'
+    } | Select-Object -First 1
+    $preferredEnr = if ($intuneEnr) { $intuneEnr } else { ($enr | Where-Object { $_.MdmEnrollmentUrl -or $_.ProviderID } | Select-Object -First 1) }
+
+    # Best available URL source (dsregcmd first, then preferred enrollment, then fallbacks)
     $urlCandidate = $ds.MDMUrl
+    if (-not $urlCandidate -and $preferredEnr) {
+        $urlCandidate = $preferredEnr.MdmEnrollmentUrl
+        if (-not $urlCandidate) { $urlCandidate = $preferredEnr.DiscoveryServiceFullURL }
+    }
     if (-not $urlCandidate) {
         $urlCandidate = ($enr | Where-Object { $_.MdmEnrollmentUrl } | Select-Object -First 1 -ExpandProperty MdmEnrollmentUrl)
         if (-not $urlCandidate) {
@@ -170,13 +188,16 @@ function Get-MdmEnrollment {
         }
     }
 
-    # Other identity hints
-    $provId   = ($enr | Where-Object { $_.ProviderID }   | Select-Object -First 1 -ExpandProperty ProviderID)
-    $provName = ($enr | Where-Object { $_.ProviderName } | Select-Object -First 1 -ExpandProperty ProviderName)
+    # Other identity hints from preferred enrollment, then first available
+    $provId   = if ($preferredEnr -and $preferredEnr.ProviderID)   { $preferredEnr.ProviderID }   else { ($enr | Where-Object { $_.ProviderID }   | Select-Object -First 1 -ExpandProperty ProviderID) }
+    $provName = if ($preferredEnr -and $preferredEnr.ProviderName) { $preferredEnr.ProviderName } else { ($enr | Where-Object { $_.ProviderName } | Select-Object -First 1 -ExpandProperty ProviderName) }
     $upn      = $ds.MDMUserUPN
     if (-not $upn) { $upn = ($enr | Where-Object { $_.UPN } | Select-Object -First 1 -ExpandProperty UPN) }
 
-    $vendor   = Guess-MdmVendor -Url $urlCandidate -ProviderId $provId -ProviderName $provName
+    $vendor = Guess-MdmVendor -Url $urlCandidate -ProviderId $provId -ProviderName $provName
+
+    # Primary enrollment type (user vs device) from the enrollment we used for URL/Provider
+    $primaryEnrollmentType = if ($preferredEnr -and $null -ne $preferredEnr.EnrollmentType) { $preferredEnr.EnrollmentType } else { ($enr | Where-Object { $null -ne $_.EnrollmentType } | Select-Object -First 1 -ExpandProperty EnrollmentType) }
 
     # If any of these show up, we consider it enrolled
     $isEnrolled = $false
@@ -203,14 +224,15 @@ function Get-MdmEnrollment {
 
     # Primary summary
     [pscustomobject]@{
-        IsMdmEnrolled  = $isEnrolled
-        VendorGuess    = $vendor
-        ProviderID     = $provId
-        ProviderName   = $provName
-        MDMUrl         = $urlCandidate
-        MDMUserUPN     = $upn
-        AzureAdJoined  = $aadJoined
-        Details        = $details
+        IsMdmEnrolled     = $isEnrolled
+        VendorGuess       = $vendor
+        ProviderID        = $provId
+        ProviderName      = $provName
+        MDMUrl            = $urlCandidate
+        MDMUserUPN        = $upn
+        AzureAdJoined     = $aadJoined
+        EnrollmentType    = $primaryEnrollmentType
+        Details           = $details
     }
 }
 
