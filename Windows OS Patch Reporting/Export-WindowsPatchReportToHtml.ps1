@@ -58,7 +58,7 @@ try {
 }
 catch {
     Write-Error "Failed to import NinjaOneDocs module. Error: $_"
-    exit
+    exit 1
 }
 
 # Use credentials passed from parent (respawn) if present; otherwise get from NinjaOne context
@@ -83,7 +83,7 @@ try {
 }
 catch {
     Write-Error "Failed to connect to NinjaOne API. Error: $_"
-    exit
+    exit 1
 }
 
 function Convert-ActivityTime {
@@ -179,7 +179,7 @@ try {
 }
 catch {
     Write-Error "Failed to retrieve devices or organizations. Error: $_"
-    exit
+    exit 1
 }
 
 # Patch installations for date range
@@ -224,7 +224,7 @@ try {
 }
 catch {
     Write-Error "Failed to retrieve activities. Error: $_"
-    exit
+    exit 1
 }
 
 # Index devices and organizations
