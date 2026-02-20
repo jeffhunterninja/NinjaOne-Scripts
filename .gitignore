@@ -1,0 +1,5 @@
+# macOS
+.DS_Store
+
+# Cursor IDE
+.cursor/debug.log
