@@ -4,12 +4,25 @@ This document outlines the configurable script variables used to define scheduli
 
 ---
 
+## Version
+
+**v1** - Initial release on 2025-03-27
+
+**v2** — Code cleanup, bugfixes on 2026-02-16
+
+**v3** - Added support for Monthly, Day of Week as a mode and option for Window Recurrence. Changed exit code structure to match other scripts.
+
+---
+
 ## Exit Codes
 
 | Code | Meaning |
 |------|---------|
+| `0` | Condition not met (outside window, too far from target, window passed) |
 | `1` | Condition met (within window or at target time; NinjaOne triggers linked automation) |
-| `2` | Condition not met (outside window, too far from target, or validation/parse error) |
+| `2` | Error (validation/parse error, missing required parameters) |
+
+Configure the compound condition so that **exit code 1** is treated as condition met (trigger).
 
 ---
 

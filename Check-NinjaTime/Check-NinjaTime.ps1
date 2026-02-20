@@ -5,8 +5,9 @@
     and support for environment variable defaults.
 
 .EXIT CODES
+  0 = Condition not met (outside window, too far from target, window passed)
   1 = Condition met (within window or at target time; NinjaOne triggers linked automation)
-  2 = Condition not met (outside window, too far from target, or validation/parse error)
+  2 = Error (validation failure, parse error, missing required params)
 
 .DESCRIPTION
     This script supports several scheduling modes:
@@ -336,14 +337,14 @@ switch ($Mode) {
                 $timeToWait = $todayWindowStart - $now
                 if ($timeToWait.TotalMinutes -gt $TimeWindowMinutes) {
                     Write-Output "Today's window starts in more than $TimeWindowMinutes minutes. Exiting."
-                    exit 2
+                    exit 0
                 }
                 $sleepSec = [math]::Min([math]::Ceiling($timeToWait.TotalSeconds), 2147483647)
                 Write-Output "Current time is before today's window. Sleeping for $sleepSec seconds until window starts at $todayWindowStart."
                 Start-Sleep -Seconds $sleepSec
             } elseif ($now -gt $todayWindowEnd) {
                 Write-Output "Today's window has passed. Exiting."
-                exit 2
+                exit 0
             }
             Write-Output "Current time is within today's window. Condition met; NinjaOne will invoke the linked action."
             exit 1
@@ -378,14 +379,14 @@ switch ($Mode) {
                 $timeToWait = $nextWindow.Start - $now
                 if ($timeToWait.TotalMinutes -gt $TimeWindowMinutes) {
                     Write-Output "Next window start ($($nextWindow.Start)) is not within the next $TimeWindowMinutes minutes. Exiting."
-                    exit 2
+                    exit 0
                 }
                 $sleepSec = [math]::Min([math]::Ceiling($timeToWait.TotalSeconds), 2147483647)
                 Write-Output "Current time is before the next weekly window. Sleeping for $sleepSec seconds until window starts at $($nextWindow.Start)."
                 Start-Sleep -Seconds $sleepSec
             } elseif ($now -gt $nextWindow.End) {
                 Write-Output "Current time is past the next window ($($nextWindow.End)). Exiting."
-                exit 2
+                exit 0
             }
             Write-Output "Current time is within the weekly window. Condition met; NinjaOne will invoke the linked action."
             exit 1
@@ -422,7 +423,7 @@ switch ($Mode) {
                 $ts = $windowStart - $now
                 if ($ts.TotalMinutes -gt $twMin) {
                     Write-Output "This month's window starts at $windowStart, which is not within the next $TimeWindowMinutes minutes. Exiting."
-                    exit 2
+                    exit 0
                 }
                 $sleepSec = [math]::Min([math]::Ceiling($ts.TotalSeconds), 2147483647.0)
                 Write-Output "Current time is before this month's window. Sleeping for $sleepSec seconds until window starts at $windowStart."
@@ -441,7 +442,7 @@ switch ($Mode) {
                 $ts = $windowStart - $now
                 if ($ts.TotalMinutes -gt $twMin) {
                     Write-Output "Next month's window starts at $windowStart, which is not within the next $TimeWindowMinutes minutes. Exiting."
-                    exit 2
+                    exit 0
                 }
                 $sleepSec = [math]::Min([math]::Ceiling($ts.TotalSeconds), 2147483647.0)
                 Write-Output "Current time is before next month's window. Sleeping for $sleepSec seconds until window starts at $windowStart."
@@ -453,7 +454,7 @@ switch ($Mode) {
                 exit 1
             }
             Write-Output "Current time is past the next monthly window ($windowEnd). Exiting."
-            exit 2
+            exit 0
         }
         else {
             Write-Error "Unsupported WindowRecurrence value. Use Daily, Weekly, or Monthly."
@@ -466,14 +467,14 @@ switch ($Mode) {
 
         if ($timeDifference.TotalMinutes -gt $TimeWindowMinutes) {
             Write-Output "Scheduled time ($nextOccurrence) is not within the next $TimeWindowMinutes minutes. Exiting."
-            exit 2
+            exit 0
         } elseif ($timeDifference.TotalSeconds -gt 0) {
             $sleepSec = [math]::Min([math]::Ceiling($timeDifference.TotalSeconds), 2147483647)
             Write-Output "Sleeping for $sleepSec seconds until scheduled time: $nextOccurrence"
             Start-Sleep -Seconds $sleepSec
         } else {
             Write-Output "Scheduled time has already passed. Exiting."
-            exit 2
+            exit 0
         }
         Write-Output "Scheduled time reached. Condition met; NinjaOne will invoke the linked action."
         exit 1
