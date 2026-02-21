@@ -32,7 +32,7 @@ A companion script that uses the **same patch data** (one line per KB per device
 | Parameter | Description |
 |-----------|-------------|
 | `-ReportMonth` | Optional. Month and year for the report (e.g. `"December 2024"`). Omit for the current month. |
-| `-OutputPath` | Optional. Full path for the CSV file. If omitted, writes `WindowsPatchReport_<YYYYMM>.csv` in the current directory. |
+| `-OutputPath` | Optional. Folder path for CSV output. Files are named automatically (e.g. `WindowsPatchReport_<YYYYMM>.csv`). Default: current directory. |
 | `-PerOrganization` | Optional switch. When set, writes one CSV per organization (e.g. `WindowsPatchReport_<OrgName>_<YYYYMM>.csv`) instead of a single combined file. |
 
 **CSV columns:** OrganizationName, DeviceName, PatchName, KBNumber, InstalledAt, Timestamp, DeviceId.
@@ -43,8 +43,8 @@ A companion script that uses the **same patch data** (one line per KB per device
 # Current month, single CSV in current directory
 .\Export-WindowsPatchReportToCsv.ps1
 
-# Specific month, custom path
-.\Export-WindowsPatchReportToCsv.ps1 -ReportMonth "December 2024" -OutputPath "C:\Reports\patches.csv"
+# Specific month, custom output folder
+.\Export-WindowsPatchReportToCsv.ps1 -ReportMonth "December 2024" -OutputPath "C:\Reports"
 
 # One CSV per organization
 .\Export-WindowsPatchReportToCsv.ps1 -ReportMonth "January 2025" -PerOrganization
@@ -106,7 +106,7 @@ A companion script that uses the **same patch data and logic** as `Publish-Windo
 | Parameter | Description |
 |-----------|-------------|
 | `-ReportMonth` | Optional. Month and year for the report (e.g. `"December 2024"`). Omit for the current month. |
-| `-OutputPath` | Optional. Full path for the HTML file. If omitted, writes `WindowsPatchReport_<YYYYMM>.html` in the current directory. |
+| `-OutputPath` | Optional. Folder path for HTML output. Files are named automatically (e.g. `WindowsPatchReport_<YYYYMM>.html`). Default: current directory. |
 | `-PerOrganization` | Optional switch. When set, writes one HTML file per organization (e.g. `WindowsPatchReport_<OrgName>_<YYYYMM>.html`) instead of a single combined file. Per-org files include patch statistics (scan cycles, apply cycles, installations, failures). |
 | `-UsePSWriteHTML` | Optional switch. When set, uses the PSWriteHTML module for styled reports (installed automatically if missing). Otherwise uses built-in simple HTML. |
 
@@ -118,8 +118,8 @@ A companion script that uses the **same patch data and logic** as `Publish-Windo
 # Current month, single HTML in current directory
 .\Export-WindowsPatchReportToHtml.ps1
 
-# Specific month, custom path
-.\Export-WindowsPatchReportToHtml.ps1 -ReportMonth "December 2024" -OutputPath "C:\Reports\patches.html"
+# Specific month, custom output folder
+.\Export-WindowsPatchReportToHtml.ps1 -ReportMonth "December 2024" -OutputPath "C:\Reports"
 
 # One HTML per organization
 .\Export-WindowsPatchReportToHtml.ps1 -ReportMonth "January 2025" -PerOrganization

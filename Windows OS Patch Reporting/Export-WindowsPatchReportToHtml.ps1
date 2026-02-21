@@ -14,7 +14,7 @@ param (
     [Parameter()]
     [string]$ReportMonth = $env:reportMonth,
     [Parameter()]
-    [string]$OutputPath = $env:outputPath,
+    [string]$OutputPath = $env:outputPath,  # Optional; folder for output; files auto-named (e.g. WindowsPatchReport_<YYYYMM>.html). Default: current directory
     [Parameter()]
     [Switch]$PerOrganization = [System.Convert]::ToBoolean($env:perOrganization),
     [Parameter()]
@@ -438,12 +438,14 @@ function Write-PSWriteHtmlReport {
 # ----- Main output -----
 $reportTitle = "Windows Patch Report - $currentMonth $currentYear"
 $dateRangeText = "Report period: $($FirstDayOfMonth.ToShortDateString()) - $($LastDayOfMonth.ToShortDateString())"
-if (-not $OutputPath) {
-    $OutputPath = Join-Path (Get-Location) "WindowsPatchReport_${yyyyMM}.html"
+$outDir = if ([string]::IsNullOrWhiteSpace($OutputPath)) { (Get-Location).Path } else { $OutputPath.Trim() }
+if (-not (Test-Path -Path $outDir -PathType Container)) {
+    New-Item -ItemType Directory -Path $outDir -Force | Out-Null
 }
+$outFile = Join-Path $outDir "WindowsPatchReport_${yyyyMM}.html"
 
 if ($UsePSWriteHTML) {
-    Write-PSWriteHtmlReport -OrgReportData $orgReportData -ReportTitle $reportTitle -DateRangeText $dateRangeText -OutPath $OutputPath -PerOrg:$PerOrganization -yyyyMM $yyyyMM
+    Write-PSWriteHtmlReport -OrgReportData $orgReportData -ReportTitle $reportTitle -DateRangeText $dateRangeText -OutPath $outFile -PerOrg:$PerOrganization -yyyyMM $yyyyMM
 } else {
-    Write-SimpleHtmlReport -OrgReportData $orgReportData -ReportTitle $reportTitle -DateRangeText $dateRangeText -OutPath $OutputPath -PerOrg:$PerOrganization -NinjaOneInstanceForLinks $NinjaOneInstance
+    Write-SimpleHtmlReport -OrgReportData $orgReportData -ReportTitle $reportTitle -DateRangeText $dateRangeText -OutPath $outFile -PerOrg:$PerOrganization -NinjaOneInstanceForLinks $NinjaOneInstance
 }

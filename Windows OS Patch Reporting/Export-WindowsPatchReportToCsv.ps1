@@ -13,7 +13,7 @@ param (
     [Parameter()]
     [string]$ReportMonth = $env:reportMonth,  # Optional (e.g., "December 2024"); defaults to current month
     [Parameter()]
-    [string]$OutputPath = $env:outputPath,   # Optional; default: .\WindowsPatchReport_<YYYYMM>.csv
+    [string]$OutputPath = $env:outputPath,   # Optional; folder for output; files auto-named (e.g. WindowsPatchReport_<YYYYMM>.csv). Default: current directory
     [Parameter()]
     [Switch]$PerOrganization = [System.Convert]::ToBoolean($env:perOrganization)  # If set, write one CSV per organization
 )
@@ -191,7 +191,7 @@ foreach ($patchinstall in $patchinstalls) {
         KBNumber        = $patchinstall.kbNumber
         InstalledAt     = $installedAt
         Timestamp       = $timestamp
-        DeviceId        = $patchinstall.deviceId
+        DeviceId        = $patchinstall.deviceId    
     }
     [void]$table.Add($row)
 }
@@ -201,17 +201,20 @@ $exportParams = @{
     Encoding          = [System.Text.Encoding]::UTF8
 }
 
+$outDir = if ([string]::IsNullOrWhiteSpace($OutputPath)) { (Get-Location).Path } else { $OutputPath.Trim() }
+if (-not (Test-Path -Path $outDir -PathType Container)) {
+    New-Item -ItemType Directory -Path $outDir -Force | Out-Null
+}
+
 if ($PerOrganization) {
     $table | Group-Object -Property OrganizationName | ForEach-Object {
         $safeName = ($_.Name -replace '[^\w\s\-]', '' -replace '\s+', '_').Trim()
-        $path = Join-Path (Get-Location) "WindowsPatchReport_${safeName}_${yyyyMM}.csv"
+        $path = Join-Path $outDir "WindowsPatchReport_${safeName}_${yyyyMM}.csv"
         $_.Group | Export-Csv -Path $path @exportParams
         Write-Output ('Exported {0} rows to {1}' -f $_.Group.Count, $path)
     }
 } else {
-    if (-not $OutputPath) {
-        $OutputPath = Join-Path (Get-Location) "WindowsPatchReport_${yyyyMM}.csv"
-    }
-    $table | Export-Csv -Path $OutputPath @exportParams
-    Write-Output ('Exported {0} rows to {1}' -f $table.Count, $OutputPath)
+    $filePath = Join-Path $outDir "WindowsPatchReport_${yyyyMM}.csv"
+    $table | Export-Csv -Path $filePath @exportParams
+    Write-Output ('Exported {0} rows to {1}' -f $table.Count, $filePath)
 }
