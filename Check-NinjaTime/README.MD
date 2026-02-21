@@ -24,6 +24,8 @@ This document outlines the configurable script variables used to define scheduli
 
 Configure the compound condition so that **exit code 1** is treated as condition met (trigger).
 
+When **InvertExitCode** is enabled, exit codes 0 and 1 are swapped (2 is unchanged); configure the compound condition so that **exit code 0** is treated as condition met.
+
 ---
 
 ## 📋 Script Variables Overview
@@ -34,13 +36,14 @@ Configure the compound condition so that **exit code 1** is treated as condition
 | `Target Time`                | Time or DateTime               | DATETIME  | Full datetime for `Once`, time only for `Daily`, `Weekly`, `Monthly`, and `MonthlyDayOfWeek` |
 | `Weekly Day Of Week`         | Weekly / MonthlyDayOfWeek mode | TEXT      | Comma-separated for Weekly; single day (e.g. `Tuesday`) for MonthlyDayOfWeek |
 | `Monthly Day Of Month`       | Monthly mode                   | INTEGER   | Numeric day of the month (1–31)                                      |
-| `Monthly Occurrence`         | Monthly, Day of Week mode      | TEXT      | `1`, `2`, `3`, `4`, or `Last` (e.g. second Tuesday, last Saturday)    |
+| `Monthly Occurrence`         | Monthly, Day of Week mode      | DROPDOWN      | `1`, `2`, `3`, `4`, or `Last` (e.g. second Tuesday, last Saturday)    |
 | `Window Recurrence`          | Window recurrence              | DROPDOWN  | Required for `Window` mode. Options: `Daily`, `Weekly`, `Monthly`  |
 | `Window Start`               | Start of window                | DATETIME  | Time only used                                                       |
 | `Window End`                 | End of window                  | DATETIME  | Time only used                                                       |
 | `Window Day of Week`         | Weekly / Monthly window        | TEXT      | Required if recurrence is `Weekly` or `Monthly`; single day for `Monthly` |
-| `Window Monthly Occurrence`  | Monthly window recurrence      | TEXT      | Required if `Window Recurrence` is `Monthly`. Values: `1`, `2`, `3`, `4`, or `Last` |
+| `Window Monthly Occurrence`  | Monthly window recurrence      | DROPDOWN      | Required if `Window Recurrence` is `Monthly`. Values: `1`, `2`, `3`, `4`, or `Last` |
 | `Time Window Minutes`        | Grace period (minutes)         | INTEGER   | Optional. Set to interval + 1 (e.g., 16 for 15-min interval). Default 5. |
+| `Invert Exit Code`           | Invert success/not-met codes   | CHECKBOX  | Optional. When true, exit 0/1 are swapped; 2 unchanged. Env: `invertExitCode` (true, 1, yes). |
 
 ---
 

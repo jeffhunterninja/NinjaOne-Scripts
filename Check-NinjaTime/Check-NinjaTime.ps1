@@ -8,6 +8,7 @@
   0 = Condition not met (outside window, too far from target, window passed)
   1 = Condition met (within window or at target time; NinjaOne triggers linked automation)
   2 = Error (validation failure, parse error, missing required params)
+  When -InvertExitCode is used, 0 and 1 are swapped; 2 is unchanged.
 
 .DESCRIPTION
     This script supports several scheduling modes:
@@ -73,8 +74,14 @@
     the script will sleep until it and exit 1. Set to interval + 1 (e.g., 16 for 15-min interval).
     (Defaults to environment variable 'timeWindowMinutes' or 5.)
 
+.PARAMETER InvertExitCode
+    When set, exit code 0 and 1 are swapped so that condition-not-met reports 1 and condition-met
+    reports 0; use when the downstream system expects the opposite. Error exit code 2 is unchanged.
+    (Defaults to environment variable 'invertExitCode': true, 1, or yes.)
+
 .NOTES
     NinjaOne will invoke the linked action when this script exits 1 (condition met).
+    With -InvertExitCode, treat exit 0 as condition met (trigger) and exit 1 as condition not met.
 #>
 
 [CmdletBinding()]
@@ -82,14 +89,15 @@ param(
     [string]$Mode,
     [string]$TargetTime,
     [string[]]$DayOfWeek,
-    [int]$DayOfMonth,
+    [string]$DayOfMonth,
     [string]$MonthlyOccurrence,
     [string]$WindowStart,
     [string]$WindowEnd,
     [string]$WindowRecurrence,
     [string]$WindowMonthlyOccurrence,
     [string[]]$WindowDayOfWeek,
-    [int]$TimeWindowMinutes = 5
+    [string]$TimeWindowMinutes = '5',
+    [switch]$InvertExitCode
 )
 
 $ErrorActionPreference = 'Stop'
@@ -98,9 +106,9 @@ $ErrorActionPreference = 'Stop'
 if ([string]::IsNullOrWhiteSpace($Mode) -and $null -ne $env:mode -and -not [string]::IsNullOrWhiteSpace($env:mode))           { $Mode = $env:mode.Trim() }
 if ([string]::IsNullOrWhiteSpace($TargetTime) -and $null -ne $env:targetTime -and -not [string]::IsNullOrWhiteSpace($env:targetTime)) { $TargetTime = $env:targetTime.Trim() }
 if ((-not $DayOfWeek -or $DayOfWeek.Count -eq 0) -and $null -ne $env:weeklyDayOfWeek -and -not [string]::IsNullOrWhiteSpace($env:weeklyDayOfWeek)) { $DayOfWeek = @($env:weeklyDayOfWeek) }
-if (-not $DayOfMonth -and $null -ne $env:monthlyDayOfMonth -and -not [string]::IsNullOrWhiteSpace($env:monthlyDayOfMonth)) {
+if ((-not $DayOfMonth -or [string]::IsNullOrWhiteSpace([string]$DayOfMonth)) -and $null -ne $env:monthlyDayOfMonth -and -not [string]::IsNullOrWhiteSpace($env:monthlyDayOfMonth)) {
     $parsed = 0
-    if ([int]::TryParse($env:monthlyDayOfMonth.Trim(), [ref]$parsed) -and $parsed -ge 1 -and $parsed -le 31) { $DayOfMonth = $parsed }
+    if ([int]::TryParse($env:monthlyDayOfMonth.Trim(), [ref]$parsed) -and $parsed -ge 1 -and $parsed -le 31) { $DayOfMonth = [string]$parsed }
 }
 if ([string]::IsNullOrWhiteSpace($MonthlyOccurrence) -and $null -ne $env:monthlyOccurrence -and -not [string]::IsNullOrWhiteSpace($env:monthlyOccurrence)) { $MonthlyOccurrence = $env:monthlyOccurrence.Trim() }
 if ([string]::IsNullOrWhiteSpace($WindowStart) -and $null -ne $env:windowStart -and -not [string]::IsNullOrWhiteSpace($env:windowStart))   { $WindowStart = $env:windowStart.Trim() }
@@ -110,13 +118,42 @@ if ([string]::IsNullOrWhiteSpace($WindowMonthlyOccurrence) -and $null -ne $env:w
 if ((-not $WindowDayOfWeek -or $WindowDayOfWeek.Count -eq 0) -and $null -ne $env:windowDayOfWeek -and -not [string]::IsNullOrWhiteSpace($env:windowDayOfWeek)) { $WindowDayOfWeek = @($env:windowDayOfWeek) }
 if ($null -ne $env:timeWindowMinutes -and -not [string]::IsNullOrWhiteSpace($env:timeWindowMinutes)) {
     $parsed = 0
-    if ([int]::TryParse($env:timeWindowMinutes.Trim(), [ref]$parsed) -and $parsed -ge 0) { $TimeWindowMinutes = $parsed }
+    if ([int]::TryParse($env:timeWindowMinutes.Trim(), [ref]$parsed) -and $parsed -ge 0) { $TimeWindowMinutes = [string]$parsed }
 }
+# Coerce DayOfMonth and TimeWindowMinutes to int (NinjaOne may pass wrong type e.g. date string when variables are mis-mapped)
+$dayOfMonthInt = 0
+if ($null -ne $DayOfMonth -and -not [string]::IsNullOrWhiteSpace([string]$DayOfMonth)) {
+    if ([int]::TryParse([string]$DayOfMonth.Trim(), [ref]$dayOfMonthInt) -and $dayOfMonthInt -ge 1 -and $dayOfMonthInt -le 31) {
+        $DayOfMonth = $dayOfMonthInt
+    } else {
+        Write-Warning "DayOfMonth ignored (invalid or out of range 1-31): '$DayOfMonth'"
+        $DayOfMonth = 0
+    }
+} else {
+    $DayOfMonth = 0
+}
+$timeWindowMinutesInt = 5
+if ($null -ne $TimeWindowMinutes -and -not [string]::IsNullOrWhiteSpace([string]$TimeWindowMinutes)) {
+    if ([int]::TryParse([string]$TimeWindowMinutes.Trim(), [ref]$timeWindowMinutesInt) -and $timeWindowMinutesInt -ge 0) {
+        $TimeWindowMinutes = $timeWindowMinutesInt
+    } else {
+        Write-Warning "TimeWindowMinutes ignored (invalid or negative): '$TimeWindowMinutes'; using 5."
+        $TimeWindowMinutes = 5
+    }
+} else {
+    $TimeWindowMinutes = 5
+}
+if (-not $PSBoundParameters.ContainsKey('InvertExitCode') -and $null -ne $env:invertExitCode -and -not [string]::IsNullOrWhiteSpace($env:invertExitCode)) {
+    $v = $env:invertExitCode.Trim().ToLowerInvariant()
+    if ($v -eq 'true' -or $v -eq '1' -or $v -eq 'yes') { $InvertExitCode = $true }
+}
+
+function Resolve-ExitCode { param([int]$Code); if ($Code -eq 2) { return 2 }; if ($InvertExitCode -and ($Code -eq 0 -or $Code -eq 1)) { return 1 - $Code }; return $Code }
 
 # Normalize Mode and WindowRecurrence for case-insensitive comparison.
 $Mode = ($Mode -as [string]).Trim().ToLowerInvariant()
 if ($Mode -eq 'monthly, day of week') { $Mode = 'monthlydayofweek' }
-if ([string]::IsNullOrWhiteSpace($Mode)) { Write-Error "Mode parameter is required. Set via parameter or NinjaOne script variable 'mode'."; exit 2 }
+if ([string]::IsNullOrWhiteSpace($Mode)) { Write-Error "Mode parameter is required. Set via parameter or NinjaOne script variable 'mode'."; exit (Resolve-ExitCode 2) }
 if ($WindowRecurrence) { $WindowRecurrence = $WindowRecurrence.Trim().ToLowerInvariant() }
 
 # Parse comma/semicolon-separated day-of-week strings into arrays.
@@ -129,12 +166,14 @@ function Split-DayOfWeek {
 $DayOfWeek = Split-DayOfWeek -InputValue $DayOfWeek
 $WindowDayOfWeek = Split-DayOfWeek -InputValue $WindowDayOfWeek
 
-# Parse day name to [System.DayOfWeek] (case-insensitive).
+# Parse day name to [System.DayOfWeek] (case-insensitive). Avoids Enum.TryParse for compatibility with older PowerShell hosts (e.g. NinjaRMM).
 function Get-DayOfWeekFromName {
     param([string]$DayName)
     if ([string]::IsNullOrWhiteSpace($DayName)) { return $null }
-    $parsed = $null
-    if ([Enum]::TryParse([System.DayOfWeek], $DayName.Trim(), $true, [ref]$parsed)) { return $parsed }
+    $trimmed = $DayName.Trim()
+    foreach ($v in [Enum]::GetValues([System.DayOfWeek])) {
+        if ([string]::Equals($v.ToString(), $trimmed, [StringComparison]::OrdinalIgnoreCase)) { return $v }
+    }
     return $null
 }
 
@@ -188,7 +227,7 @@ $WindowMonthlyOccurrenceNormalized = Get-NormalizedMonthlyOccurrence -Occurrence
 
 if ($Mode -eq 'monthlydayofweek' -and -not [string]::IsNullOrWhiteSpace($MonthlyOccurrence) -and $null -eq $MonthlyOccurrenceNormalized) {
     Write-Error "Invalid MonthlyOccurrence: '$($MonthlyOccurrence.Trim())'. Use 1, 2, 3, 4, or Last."
-    exit 2
+    exit (Resolve-ExitCode 2)
 }
 
 Write-Verbose "Mode: '$Mode', TargetTime: '$TargetTime', DayOfWeek: '$($DayOfWeek -join ', ')', TimeWindowMinutes: $TimeWindowMinutes"
@@ -197,18 +236,18 @@ Write-Verbose "Mode: '$Mode', TargetTime: '$TargetTime', DayOfWeek: '$($DayOfWee
 if ($Mode -ne "window") {
     if ([string]::IsNullOrEmpty($TargetTime)) {
         Write-Error "TargetTime parameter is required for mode $Mode."
-        exit 2
+        exit (Resolve-ExitCode 2)
     }
     try {
         $TargetTime = [datetime]::Parse($TargetTime)
     } catch {
         Write-Error "TargetTime '$TargetTime' could not be parsed as a valid DateTime."
-        exit 2
+        exit (Resolve-ExitCode 2)
     }
 } else {
     if ([string]::IsNullOrEmpty($WindowStart) -or [string]::IsNullOrEmpty($WindowEnd)) {
         Write-Error "WindowStart and WindowEnd parameters are required for Window mode."
-        exit 2
+        exit (Resolve-ExitCode 2)
     }
     try {
         # Parse the ISO8601 string and extract the local time portion in "HH:mm" format.
@@ -220,7 +259,7 @@ if ($Mode -ne "window") {
         Write-Verbose "Parsed WindowStart TimeSpan: $WindowStartTS, WindowEnd TimeSpan: $WindowEndTS"
     } catch {
         Write-Error "WindowStart or WindowEnd could not be parsed as valid TimeSpan values. Error: $_"
-        exit 2
+        exit (Resolve-ExitCode 2)
     }
 }
 
@@ -248,11 +287,11 @@ function Get-NextOccurrence {
         "weekly" {
             if (-not $DayOfWeek -or $DayOfWeek.Count -eq 0) {
                 Write-Error "DayOfWeek parameter is required for Weekly mode."
-                exit 2
+                exit (Resolve-ExitCode 2)
             }
             $occurrences = foreach ($dow in $DayOfWeek) {
                 $targetDayVal = Get-DayOfWeekFromName -DayName $dow
-                if ($null -eq $targetDayVal) { Write-Error "Invalid day of week: '$dow'. Use Sunday, Monday, Tuesday, Wednesday, Thursday, Friday, or Saturday."; exit 2 }
+                if ($null -eq $targetDayVal) { Write-Error "Invalid day of week: '$dow'. Use Sunday, Monday, Tuesday, Wednesday, Thursday, Friday, or Saturday."; exit (Resolve-ExitCode 2) }
                 $targetDay = [int]$targetDayVal
                 $currentDay = [int]$now.DayOfWeek
                 $daysToAdd = $targetDay - $currentDay
@@ -266,7 +305,7 @@ function Get-NextOccurrence {
         "monthly" {
             if (-not $DayOfMonth) {
                 Write-Error "DayOfMonth parameter is required for Monthly mode."
-                exit 2
+                exit (Resolve-ExitCode 2)
             }
             $year = $now.Year
             $month = $now.Month
@@ -274,7 +313,7 @@ function Get-NextOccurrence {
                 $occurrence = Get-Date -Year $year -Month $month -Day $DayOfMonth -Hour $TargetTime.Hour -Minute $TargetTime.Minute -Second $TargetTime.Second
             } catch {
                 Write-Error "Invalid DayOfMonth for the current month."
-                exit 2
+                exit (Resolve-ExitCode 2)
             }
             if ($occurrence -gt $now) {
                 return $occurrence
@@ -286,7 +325,7 @@ function Get-NextOccurrence {
                     $occurrence = Get-Date -Year $year -Month $month -Day $DayOfMonth -Hour $TargetTime.Hour -Minute $TargetTime.Minute -Second $TargetTime.Second
                 } catch {
                     Write-Error "Invalid DayOfMonth for the next month."
-                    exit 2
+                    exit (Resolve-ExitCode 2)
                 }
                 return $occurrence
             }
@@ -294,14 +333,14 @@ function Get-NextOccurrence {
         "monthlydayofweek" {
             if (-not $DayOfWeek -or $DayOfWeek.Count -eq 0) {
                 Write-Error "DayOfWeek parameter is required for Monthly, Day of Week mode (use a single day, e.g. Tuesday)."
-                exit 2
+                exit (Resolve-ExitCode 2)
             }
             if (-not $MonthlyOccurrence) {
                 Write-Error "MonthlyOccurrence parameter is required for Monthly, Day of Week mode. Use 1, 2, 3, 4, or Last."
-                exit 2
+                exit (Resolve-ExitCode 2)
             }
             $dowVal = Get-DayOfWeekFromName -DayName $DayOfWeek[0]
-            if ($null -eq $dowVal) { Write-Error "Invalid day of week: '$($DayOfWeek[0])'. Use Sunday, Monday, Tuesday, Wednesday, Thursday, Friday, or Saturday."; exit 2 }
+            if ($null -eq $dowVal) { Write-Error "Invalid day of week: '$($DayOfWeek[0])'. Use Sunday, Monday, Tuesday, Wednesday, Thursday, Friday, or Saturday."; exit (Resolve-ExitCode 2) }
             $year = $now.Year
             $month = $now.Month
             $occurrenceDate = Get-NthWeekdayInMonth -Year $year -Month $month -DayOfWeek $dowVal -Occurrence $MonthlyOccurrence
@@ -315,7 +354,7 @@ function Get-NextOccurrence {
         }
         default {
             Write-Error "Unsupported mode in Get-NextOccurrence."
-            exit 2
+            exit (Resolve-ExitCode 2)
         }
     }
 }
@@ -337,26 +376,26 @@ switch ($Mode) {
                 $timeToWait = $todayWindowStart - $now
                 if ($timeToWait.TotalMinutes -gt $TimeWindowMinutes) {
                     Write-Output "Today's window starts in more than $TimeWindowMinutes minutes. Exiting."
-                    exit 0
+                    exit (Resolve-ExitCode 0)
                 }
                 $sleepSec = [math]::Min([math]::Ceiling($timeToWait.TotalSeconds), 2147483647)
                 Write-Output "Current time is before today's window. Sleeping for $sleepSec seconds until window starts at $todayWindowStart."
                 Start-Sleep -Seconds $sleepSec
             } elseif ($now -gt $todayWindowEnd) {
                 Write-Output "Today's window has passed. Exiting."
-                exit 0
+                exit (Resolve-ExitCode 0)
             }
             Write-Output "Current time is within today's window. Condition met; NinjaOne will invoke the linked action."
-            exit 1
+            exit (Resolve-ExitCode 1)
         }
         elseif ($WindowRecurrence -eq "weekly") {
             if (-not $WindowDayOfWeek -or $WindowDayOfWeek.Count -eq 0) {
                 Write-Error "WindowDayOfWeek parameter is required for Weekly window recurrence."
-                exit 2
+                exit (Resolve-ExitCode 2)
             }
             $windowOccurrences = foreach ($dow in $WindowDayOfWeek) {
                 $targetDayVal = Get-DayOfWeekFromName -DayName $dow
-                if ($null -eq $targetDayVal) { Write-Error "Invalid window day of week: '$dow'. Use Sunday, Monday, Tuesday, Wednesday, Thursday, Friday, or Saturday."; exit 2 }
+                if ($null -eq $targetDayVal) { Write-Error "Invalid window day of week: '$dow'. Use Sunday, Monday, Tuesday, Wednesday, Thursday, Friday, or Saturday."; exit (Resolve-ExitCode 2) }
                 $targetDay = [int]$targetDayVal
                 $currentDay = [int]$now.DayOfWeek
                 $daysToAdd = $targetDay - $currentDay
@@ -379,22 +418,22 @@ switch ($Mode) {
                 $timeToWait = $nextWindow.Start - $now
                 if ($timeToWait.TotalMinutes -gt $TimeWindowMinutes) {
                     Write-Output "Next window start ($($nextWindow.Start)) is not within the next $TimeWindowMinutes minutes. Exiting."
-                    exit 0
+                    exit (Resolve-ExitCode 0)
                 }
                 $sleepSec = [math]::Min([math]::Ceiling($timeToWait.TotalSeconds), 2147483647)
                 Write-Output "Current time is before the next weekly window. Sleeping for $sleepSec seconds until window starts at $($nextWindow.Start)."
                 Start-Sleep -Seconds $sleepSec
             } elseif ($now -gt $nextWindow.End) {
                 Write-Output "Current time is past the next window ($($nextWindow.End)). Exiting."
-                exit 0
+                exit (Resolve-ExitCode 0)
             }
             Write-Output "Current time is within the weekly window. Condition met; NinjaOne will invoke the linked action."
-            exit 1
+            exit (Resolve-ExitCode 1)
         }
         elseif ($WindowRecurrence -eq "monthly") {
             if (-not $WindowDayOfWeek -or $WindowDayOfWeek.Count -eq 0) {
                 Write-Error "WindowDayOfWeek parameter is required for Monthly window recurrence (use a single day, e.g. Tuesday)."
-                exit 2
+                exit (Resolve-ExitCode 2)
             }
             if (-not $WindowMonthlyOccurrenceNormalized) {
                 if (-not [string]::IsNullOrWhiteSpace($WindowMonthlyOccurrence)) {
@@ -402,10 +441,10 @@ switch ($Mode) {
                 } else {
                     Write-Error "WindowMonthlyOccurrence parameter is required for Monthly window recurrence. Use 1, 2, 3, 4, or Last."
                 }
-                exit 2
+                exit (Resolve-ExitCode 2)
             }
             $dowVal = Get-DayOfWeekFromName -DayName $WindowDayOfWeek[0]
-            if ($null -eq $dowVal) { Write-Error "Invalid window day of week: '$($WindowDayOfWeek[0])'. Use Sunday, Monday, Tuesday, Wednesday, Thursday, Friday, or Saturday."; exit 2 }
+            if ($null -eq $dowVal) { Write-Error "Invalid window day of week: '$($WindowDayOfWeek[0])'. Use Sunday, Monday, Tuesday, Wednesday, Thursday, Friday, or Saturday."; exit (Resolve-ExitCode 2) }
             $twMin = [double]$TimeWindowMinutes
 
             $windowDate = Get-NthWeekdayInMonth -Year $now.Year -Month $now.Month -DayOfWeek $dowVal -Occurrence $WindowMonthlyOccurrenceNormalized
@@ -417,18 +456,18 @@ switch ($Mode) {
 
             if ($now -ge $windowStart -and $now -le $windowEnd) {
                 Write-Output "Current time is within the monthly window. Condition met; NinjaOne will invoke the linked action."
-                exit 1
+                exit (Resolve-ExitCode 1)
             }
             if ($now -lt $windowStart) {
                 $ts = $windowStart - $now
                 if ($ts.TotalMinutes -gt $twMin) {
                     Write-Output "This month's window starts at $windowStart, which is not within the next $TimeWindowMinutes minutes. Exiting."
-                    exit 0
+                    exit (Resolve-ExitCode 0)
                 }
                 $sleepSec = [math]::Min([math]::Ceiling($ts.TotalSeconds), 2147483647.0)
                 Write-Output "Current time is before this month's window. Sleeping for $sleepSec seconds until window starts at $windowStart."
                 Start-Sleep -Seconds $sleepSec
-                exit 1
+                exit (Resolve-ExitCode 1)
             }
             # This month's window has passed; try next month
             $nextMonth = $now.AddMonths(1)
@@ -442,23 +481,23 @@ switch ($Mode) {
                 $ts = $windowStart - $now
                 if ($ts.TotalMinutes -gt $twMin) {
                     Write-Output "Next month's window starts at $windowStart, which is not within the next $TimeWindowMinutes minutes. Exiting."
-                    exit 0
+                    exit (Resolve-ExitCode 0)
                 }
                 $sleepSec = [math]::Min([math]::Ceiling($ts.TotalSeconds), 2147483647.0)
                 Write-Output "Current time is before next month's window. Sleeping for $sleepSec seconds until window starts at $windowStart."
                 Start-Sleep -Seconds $sleepSec
-                exit 1
+                exit (Resolve-ExitCode 1)
             }
             if ($now -ge $windowStart -and $now -le $windowEnd) {
                 Write-Output "Current time is within the monthly window. Condition met; NinjaOne will invoke the linked action."
-                exit 1
+                exit (Resolve-ExitCode 1)
             }
             Write-Output "Current time is past the next monthly window ($windowEnd). Exiting."
-            exit 0
+            exit (Resolve-ExitCode 0)
         }
         else {
             Write-Error "Unsupported WindowRecurrence value. Use Daily, Weekly, or Monthly."
-            exit 2
+            exit (Resolve-ExitCode 2)
         }
     }
     default {
@@ -467,16 +506,16 @@ switch ($Mode) {
 
         if ($timeDifference.TotalMinutes -gt $TimeWindowMinutes) {
             Write-Output "Scheduled time ($nextOccurrence) is not within the next $TimeWindowMinutes minutes. Exiting."
-            exit 0
+            exit (Resolve-ExitCode 0)
         } elseif ($timeDifference.TotalSeconds -gt 0) {
             $sleepSec = [math]::Min([math]::Ceiling($timeDifference.TotalSeconds), 2147483647)
             Write-Output "Sleeping for $sleepSec seconds until scheduled time: $nextOccurrence"
             Start-Sleep -Seconds $sleepSec
         } else {
             Write-Output "Scheduled time has already passed. Exiting."
-            exit 0
+            exit (Resolve-ExitCode 0)
         }
         Write-Output "Scheduled time reached. Condition met; NinjaOne will invoke the linked action."
-        exit 1
+        exit (Resolve-ExitCode 1)
     }
 }
