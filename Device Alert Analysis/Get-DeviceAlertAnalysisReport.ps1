@@ -7,7 +7,7 @@
   - NinjaOne OAuth app configured for Client Credentials flow with appropriate scopes.
 
 .AUTH
-  Uses client_credentials to POST {Instance}/oauth/token and then calls GET {Instance}/api/v2/activities
+  Uses client_credentials to POST {Instance}/ws/oauth/token and then calls GET {Instance}/api/v2/activities
 
 .PARAMETERS (high level)
   -After / -Before : time window (DateTime)
@@ -23,7 +23,7 @@ $Config = [ordered]@{
     #   US2: https://us2.ninjarmm.com
     #   EU: https://eu.ninjarmm.com
     #   OC: https://oc.ninjarmm.com
-    Instance     = Get-NinjaProperty "ninjaoneInstance"
+    Instance     = (Get-NinjaProperty "ninjaoneInstance") -replace '^(?!https?://)', 'https://'
 
     ClientId     = Get-NinjaProperty "ninjaoneClientId"
     ClientSecret = Get-NinjaProperty "ninjaoneClientSecret"
@@ -60,7 +60,7 @@ $ActivityFilter = @{
 }
 
 $ApiPaths = @{
-    OAuthToken   = '/oauth/token'
+    OAuthToken   = '/ws/oauth/token'   # NinjaOne requires /ws/ prefix; /oauth/token returns 405
     Activities   = '/api/v2/activities'
     CustomFields = '/api/v2/device/{0}/custom-fields'
 }
