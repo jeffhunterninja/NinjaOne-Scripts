@@ -309,7 +309,7 @@ if ($jsonFiles.Count -gt 0) {
       $printers = $raw | ConvertFrom-Json
       $printers = @($printers)
       foreach ($p in $printers) {
-        if ($p -and ($p.PSObject.Properties['Name'] -or $null -ne $p.Name)) {
+        if ($p -and -not [string]::IsNullOrWhiteSpace($p.Name)) {
           $allPrinters.Add($p)
         }
       }
