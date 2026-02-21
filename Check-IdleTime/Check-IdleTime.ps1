@@ -6,16 +6,29 @@
 
 .EXIT CODES
   0 = OK (no threshold or idle < threshold)
-  1 = Not elevated
-  2 = ALERT (idle >= threshold)
+  1 = ALERT (idle >= threshold)
+  2 = Not elevated
+
+.EXAMPLE
+  .\Check-IdleTime.ps1
+  Run with default settings (no threshold). Measures all active sessions and writes idle time to NinjaOne custom fields.
+
+.EXAMPLE
+  .\Check-IdleTime.ps1 -ThresholdMinutes 60 -PerProcessTimeoutSeconds 15
+  Alert if idle >= 60 minutes; allow up to 15 seconds per session for the helper to complete.
 #>
 
 [CmdletBinding()]
 param(
   [string]$UserName,
+  [ValidateRange(0, [int]::MaxValue)]
   [int]$ThresholdMinutes = 0,
+  [ValidateRange(1, 300)]
   [int]$PerProcessTimeoutSeconds = 10
 )
+
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
 
 # NinjaOne script variable "Threshold Minutes" populates $env:thresholdminutes; use it when present and valid
 if ($null -ne $env:thresholdminutes -and -not [string]::IsNullOrWhiteSpace($env:thresholdminutes)) {
@@ -282,7 +295,7 @@ public static class UserIdleHelper
 
 if (-not (Test-IsElevated)) {
   Write-Error "Access Denied. Please run with Administrator privileges."
-  exit 1
+  exit 2
 }
 
 if (-not (Get-Command Ninja-Property-Set -ErrorAction SilentlyContinue)) {
@@ -423,8 +436,9 @@ if (-not $eval) {
 }
 
 # 5) Optional: write to NinjaOne CFs
-try { Ninja-Property-Set idleTime $friendly } catch {}
-try { Ninja-Property-Set idleTimeStatus $idleMin } catch {}
+try { Ninja-Property-Set idleTime $friendly } catch { Write-Verbose "Ninja-Property-Set failed: $_" }
+try { Ninja-Property-Set idleTimeStatus $idleMin } catch { Write-Verbose "Ninja-Property-Set failed: $_" }
+try { Ninja-Property-Set idleTimeMinutes $idleMin } catch { Write-Verbose "Ninja-Property-Set failed: $_" }
 
 # 6) Summary
 $summary = [PSCustomObject]@{
@@ -444,8 +458,8 @@ $null = ($summary | Format-List * | Out-String) | ForEach-Object { Write-Host $_
 
 # 7) Exit
 if ($ThresholdMinutes -gt 0 -and $idleMin -ge $ThresholdMinutes) {
-  try { Ninja-Property-Set idleTimeStatus "ALERT: Idle $idleMin min (>= $ThresholdMinutes)" } catch {}
+  try { Ninja-Property-Set idleTimeStatus "ALERT: Idle $idleMin min (>= $ThresholdMinutes)" } catch { Write-Verbose "Ninja-Property-Set failed: $_" }
   Write-Error "Idle time threshold exceeded: $idleMin minutes (threshold: $ThresholdMinutes)."
-  exit 2
+  exit 1
 }
 exit 0
