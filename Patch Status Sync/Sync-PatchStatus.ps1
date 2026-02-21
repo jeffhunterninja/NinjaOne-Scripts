@@ -61,8 +61,8 @@ $NinjaOneInstance = Ninja-Property-Get ninjaoneInstance
 $NinjaOneClientId = Ninja-Property-Get ninjaoneClientId
 $NinjaOneClientSecret = Ninja-Property-Get ninjaoneClientSecret
 
-if (!$NinjaOneInstance -and !$NinjaOneClientId -and !$NinjaOneClientSecret) {
-    Write-Output "Missing required API credentials"
+if ([string]::IsNullOrWhiteSpace($NinjaOneInstance) -or [string]::IsNullOrWhiteSpace($NinjaOneClientId) -or [string]::IsNullOrWhiteSpace($NinjaOneClientSecret)) {
+    Write-Output "Missing required API credentials (ninjaoneInstance, ninjaoneClientId, ninjaoneClientSecret). Set all three in NinjaOne custom properties."
     exit 1
 }
 
