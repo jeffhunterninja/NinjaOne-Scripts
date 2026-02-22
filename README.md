@@ -26,6 +26,8 @@ Major update and re-write of several scripts in late February 2026
 
 - **Check-NinjaTime** ([Check-NinjaTime/](Check-NinjaTime/)) — **v3**: New `mode` and `Window` recurrence option, *Monthly Day of Week*; exit code structure standardized; added `InvertExitCode` support for flexible alerting. See [Check-NinjaTime/README.MD](Check-NinjaTime/README.MD).
 
+- **Publish-WindowsPatchReport.ps1** ([Windows OS Patch Reporting/](Windows%20OS%20Patch%20Reporting/)) — Bug fixes and code cleanup. See [Windows OS Patch Reporting/Publish-WindowsPatchReport.ps1](Windows%20OS%20Patch%20Reporting/Publish-WindowsPatchReport.ps1).
+
 - **Check-NinjaTag** ([Check-NinjaTag/](Check-NinjaTag/)) — Minor bugfixes and documentation updates. See [Check-NinjaTag/README.MD](Check-NinjaTag/README.MD).
 
 - **Sync-PatchStatus.ps1** ([Patch Status Sync/](Patch%20Status%20Sync/)) — Standardized exit codes, bugfixes, documentation updates. See [Patch Status Sync/README.md](Patch%20Status%20Sync/README.md).
@@ -34,7 +36,7 @@ Major update and re-write of several scripts in late February 2026
 
 ---
 
-## Beta Scripts
+## Beta Scripts (working based on limited QA, needs broader testing to validate functionality works consistently)
 
 - **Get-PrinterDataAsSystem.ps1** ([Get-PrinterData/](Get-PrinterData/)) — Single-script printer inventory that runs as SYSTEM using CreateProcessAsUser. Captures per-user and machine-wide printers and writes to NinjaOne custom fields. I don't have a method of testing broadly, please let me know what you see in the field. See [Get-PrinterData/README.md](Get-PrinterData/README.md).
 
