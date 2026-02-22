@@ -26,7 +26,7 @@ Major update and re-write of several scripts in late February 2026
 
 - **Check-NinjaTime** ([Check-NinjaTime/](Check-NinjaTime/)) — **v3**: New `mode` and `Window` recurrence option, *Monthly Day of Week*; exit code structure standardized; added `InvertExitCode` support for flexible alerting. See [Check-NinjaTime/README.MD](Check-NinjaTime/README.MD).
 
-- **Check-NinjaTag** ([Check-NinjaTag/](Check-NinjaTag/)) — Minor bugfixes and documentation updates See [Check-NinjaTag/README.MD](Check-NinjaTag/README.MD).
+- **Check-NinjaTag** ([Check-NinjaTag/](Check-NinjaTag/)) — Minor bugfixes and documentation updates. See [Check-NinjaTag/README.MD](Check-NinjaTag/README.MD).
 
 - **Sync-PatchStatus.ps1** ([Patch Status Sync/](Patch%20Status%20Sync/)) — Standardized exit codes, bugfixes, documentation updates. See [Patch Status Sync/README.md](Patch%20Status%20Sync/README.md).
 
@@ -37,6 +37,10 @@ Major update and re-write of several scripts in late February 2026
 ## Beta Scripts
 
 - **Get-PrinterDataAsSystem.ps1** ([Get-PrinterData/](Get-PrinterData/)) — Single-script printer inventory that runs as SYSTEM using CreateProcessAsUser. Captures per-user and machine-wide printers and writes to NinjaOne custom fields. I don't have a method of testing broadly, please let me know what you see in the field. See [Get-PrinterData/README.md](Get-PrinterData/README.md).
+
+- **Set-WeeklyMaintenanceWindow** ([Set-WeeklyMaintenanceWindow/](Set-WeeklyMaintenanceWindow/)) — Imports weekly maintenance windows from CSV to NinjaOne custom fields. Paired with Check-WeeklyMaintenanceWindow.ps1 for compound conditions or patch cycle pre-scripts, allows your to establish a window where activity can occur. See [Set-WeeklyMaintenanceWindow/README.md](Set-WeeklyMaintenanceWindow/README.md).
+
+- **Set-WeeklyPatchingSchedule** ([Set-WeeklyPatchingSchedule/](Set-WeeklyPatchingSchedule/)) — Imports weekly patching schedules from CSV to NinjaOne custom fields at the organization, location, and device levels. In this workflow, policy patching is set to a schedule of *none*. Use Check-WeeklyPatchingSchedule.ps1 as a script result condition (standard or compound) that triggers when the desired patching window is reached by using a patching automation to run in response when the automation is triggered. Approvals are still tied to distinct policies. See [Set-WeeklyPatchingSchedule/README.md](Set-WeeklyPatchingSchedule/README.md).
 
 ## Other Changes
 
