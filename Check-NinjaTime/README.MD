@@ -24,7 +24,7 @@ This document outlines the configurable script variables used to define scheduli
 
 Configure the compound condition so that **exit code 1** is treated as condition met (trigger).
 
-When **InvertExitCode** is enabled, exit codes 0 and 1 are swapped (2 is unchanged); configure the compound condition so that **exit code 0** is treated as condition met.
+When **InvertExitCode** is enabled, exit codes 0 and 1 are swapped (2 is unchanged); configure the compound condition so that **exit code 0** is treated as condition met. Realistically this only makes sense to use with Window mode.
 
 ---
 
