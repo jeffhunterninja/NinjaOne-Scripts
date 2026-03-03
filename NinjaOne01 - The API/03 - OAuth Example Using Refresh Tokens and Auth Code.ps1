@@ -24,10 +24,12 @@ Security Note:
 #>
 
 $NinjaOneInstance     = "app.ninjarmm.com"
-$NinjaOneClientId     = "-"
-$NinjaOneClientSecret = "-"
-$redirect_uri = "http://localhost:8888/"
-$auth_url = "https://$NinjaOneInstance/ws/oauth/authorize"
+$redirect_uri         = "http://localhost:8888/"
+$auth_url             = "https://$NinjaOneInstance/ws/oauth/authorize"
+
+$cred = Get-Credential -Message "Enter NinjaOne OAuth Client ID (User name) and Client Secret (Password)"
+$NinjaOneClientId     = $cred.UserName
+$NinjaOneClientSecret = $cred.GetNetworkCredential().Password
 
 # Ensure System.Web Assembly is loaded
 # This assembly is required to parse the query strings from the URL callback
@@ -51,7 +53,7 @@ try {
     # Launch Browser to NinjaOne OAuth Page
     Write-Host "Launching NinjaOne API OAuth authorization page $auth_url ..."
     # Build the full authorization URL with query parameters
-    $AuthURL = "https://$Instance/ws/oauth/authorize?response_type=code&client_id=$NinjaOneClientId&client_secret=$NinjaOneSecret&redirect_uri=$redirect_uri&state=custom_state&scope=monitoring%20management%20offline_access"
+    $AuthURL = "https://$NinjaOneInstance/ws/oauth/authorize?response_type=code&client_id=$NinjaOneClientId&client_secret=$NinjaOneClientSecret&redirect_uri=$redirect_uri&state=custom_state&scope=monitoring%20management%20offline_access"
     Start-Process $AuthURL
 
     Write-Host "Listening for authorization code from local callback to $redirect_uri ..."
@@ -137,3 +139,4 @@ $AuthHeader = @{
 
 Write-Host "`nFinal Access Token obtained. You can use '$($AuthHeader.Authorization)' in your API calls."
 Write-Host "Done!"
+
