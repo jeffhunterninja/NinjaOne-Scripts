@@ -1,10 +1,11 @@
 <#
 .SYNOPSIS
-    Sets weekly patching schedules (and other custom fields) in NinjaOne from a CSV.
+    Sets patching schedules (Daily, Weekly, or Monthly) and other custom fields in NinjaOne from a CSV.
 
 .DESCRIPTION
     Reads a CSV and updates NinjaOne custom fields for organizations, locations, or devices.
-    Primary use: set weekly patching schedule (day, start time) per org, location, or device.
+    Primary use: set patching schedule (recurrence, day/occurrence, start time) per org, location, or device.
+    Supports Daily (every day at same time), Weekly (specific day of week), and Monthly (nth weekday of month).
     CSV must have "level" (organization | location | device) and "name" to identify the target;
     all other columns are custom field name = value (e.g. patchingDay, patchingStart).
     For location level, "name" must be "organizationname,locationname" (comma-separated).
@@ -218,33 +219,14 @@ Write-Host "  Found $($devices.Count) devices."
 
 #region Build custom field payload from row (exclude level and name)
 
-function Get-NextOccurrenceUnixMs {
-    <#
-    .SYNOPSIS
-        Returns Unix time in milliseconds for the next occurrence of the given day of week at the given time (local time).
-    #>
-    param([string]$DayName, [string]$TimeString)
-    if ([string]::IsNullOrWhiteSpace($DayName) -or [string]::IsNullOrWhiteSpace($TimeString)) { return $null }
-    $dayOfWeek = [System.DayOfWeek]::Sunday
-    switch ($DayName.Trim()) {
-        'Sunday'    { $dayOfWeek = [System.DayOfWeek]::Sunday; break }
-        'Monday'    { $dayOfWeek = [System.DayOfWeek]::Monday; break }
-        'Tuesday'   { $dayOfWeek = [System.DayOfWeek]::Tuesday; break }
-        'Wednesday' { $dayOfWeek = [System.DayOfWeek]::Wednesday; break }
-        'Thursday'  { $dayOfWeek = [System.DayOfWeek]::Thursday; break }
-        'Friday'    { $dayOfWeek = [System.DayOfWeek]::Friday; break }
-        'Saturday'  { $dayOfWeek = [System.DayOfWeek]::Saturday; break }
-        default     { return $null }
-    }
-    if ($TimeString -notmatch '^(\d{1,2}):(\d{2})$') { return $null }
-    $hour = [int]$Matches[1]
-    $minute = [int]$Matches[2]
-    if ($hour -lt 0 -or $hour -gt 23 -or $minute -lt 0 -or $minute -gt 59) { return $null }
-    $today = Get-Date
-    $daysToAdd = ($dayOfWeek - $today.DayOfWeek + 7) % 7
-    if ($daysToAdd -eq 0) { $daysToAdd = 7 }
-    $target = $today.Date.AddDays($daysToAdd).AddHours($hour).AddMinutes($minute).AddSeconds(0)
-    return [long]([DateTimeOffset]::new($target).ToUnixTimeMilliseconds())
+function Get-NormalizedMonthlyOccurrence {
+    param([string]$Occurrence)
+    if ([string]::IsNullOrWhiteSpace($Occurrence)) { return $null }
+    $s = $Occurrence.Trim().ToLowerInvariant()
+    if ($s -eq 'last') { return 'Last' }
+    $n = 0
+    if ([int]::TryParse($s, [ref]$n) -and $n -ge 1 -and $n -le 4) { return [string]$n }
+    return $null
 }
 
 function Get-CustomFieldsFromRow {
@@ -259,14 +241,18 @@ function Get-CustomFieldsFromRow {
             $customFields[$prop.Name] = $val
         }
     }
-    # Convert patchingStart to Unix time (ms) using patchingDay from the same row
-    $patchingDay = ($Row.PSObject.Properties | Where-Object { $_.Name -eq 'patchingDay' } | Select-Object -ExpandProperty Value) -as [string]
-    if (-not [string]::IsNullOrWhiteSpace($patchingDay)) {
-        if ($customFields.ContainsKey('patchingStart') -and $null -ne $customFields['patchingStart'] -and $customFields['patchingStart'] -notmatch '^\d+$') {
-            $ms = Get-NextOccurrenceUnixMs -DayName $patchingDay -TimeString ($customFields['patchingStart'] -as [string])
-            if ($null -ne $ms) { $customFields['patchingStart'] = $ms }
-        }
+    # Recurrence: Daily | Weekly | Monthly (default Weekly when missing)
+    $patchingRecurrence = ($Row.PSObject.Properties | Where-Object { $_.Name -eq 'patchingRecurrence' } | Select-Object -ExpandProperty Value) -as [string]
+    if ([string]::IsNullOrWhiteSpace($patchingRecurrence)) { $patchingRecurrence = 'Weekly' }
+    else {
+        $patchingRecurrence = $patchingRecurrence.Trim().ToLowerInvariant()
+        if ($patchingRecurrence -eq 'daily') { $patchingRecurrence = 'Daily' }
+        elseif ($patchingRecurrence -eq 'weekly') { $patchingRecurrence = 'Weekly' }
+        elseif ($patchingRecurrence -eq 'monthly') { $patchingRecurrence = 'Monthly' }
+        else { $patchingRecurrence = 'Weekly' }
     }
+    $customFields['patchingRecurrence'] = $patchingRecurrence
+
     return $customFields
 }
 
@@ -311,6 +297,19 @@ foreach ($row in $rows) {
         Write-Warning "Skipping row (level=$level, name=$name): no custom field columns."
         $script:SkippedCount++
         continue
+    }
+
+    # Validate Monthly: require valid patchingOccurrence (1, 2, 3, 4, or Last)
+    $recurrence = ($customFields['patchingRecurrence'] -as [string]).Trim().ToLowerInvariant()
+    if ($recurrence -eq 'monthly') {
+        $occRaw = ($customFields['patchingOccurrence'] -as [string])
+        $occNormalized = Get-NormalizedMonthlyOccurrence -Occurrence $occRaw
+        if ($null -eq $occNormalized) {
+            Write-Warning "Skipping row (level=$level, name=$name): patchingRecurrence is Monthly but patchingOccurrence is missing or invalid. Use 1, 2, 3, 4, or Last."
+            $script:SkippedCount++
+            continue
+        }
+        $customFields['patchingOccurrence'] = $occNormalized
     }
 
     if ($level -notin 'organization', 'location', 'device') {
