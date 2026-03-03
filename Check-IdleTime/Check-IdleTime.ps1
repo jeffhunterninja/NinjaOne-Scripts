@@ -5,8 +5,8 @@
   that calls GetLastInputInfo and exits with idle seconds. Writes idle time to NinjaOne custom fields.
 
 .EXIT CODES
-  0 = OK (no threshold or idle < threshold)
-  1 = ALERT (idle >= threshold)
+  0 = OK. With AlertOn "Idle Time Greater": no threshold or idle < threshold. With AlertOn "Idle Time Lesser": no threshold or idle >= threshold.
+  1 = ALERT. With AlertOn "Idle Time Greater": idle >= threshold. With AlertOn "Idle Time Lesser": idle < threshold.
   2 = Not elevated
 
 .EXAMPLE
@@ -16,6 +16,10 @@
 .EXAMPLE
   .\Check-IdleTime.ps1 -ThresholdMinutes 60 -PerProcessTimeoutSeconds 15
   Alert if idle >= 60 minutes; allow up to 15 seconds per session for the helper to complete.
+
+.EXAMPLE
+  .\Check-IdleTime.ps1 -ThresholdMinutes 30 -AlertOn 'Idle Time Lesser'
+  Alert when idle is less than 30 minutes (e.g. user recently active). NinjaOne script variable "Alert On" can set this via $env:alerton.
 #>
 
 [CmdletBinding()]
@@ -24,7 +28,9 @@ param(
   [ValidateRange(0, [int]::MaxValue)]
   [int]$ThresholdMinutes = 0,
   [ValidateRange(1, 300)]
-  [int]$PerProcessTimeoutSeconds = 10
+  [int]$PerProcessTimeoutSeconds = 10,
+  [ValidateSet('Idle Time Greater', 'Idle Time Lesser')]
+  [string]$AlertOn = 'Idle Time Greater'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -36,6 +42,13 @@ if ($null -ne $env:thresholdminutes -and -not [string]::IsNullOrWhiteSpace($env:
   if ([int]::TryParse($env:thresholdminutes.Trim(), [ref]$parsed) -and $parsed -ge 0) {
     $ThresholdMinutes = $parsed
   }
+}
+
+# NinjaOne script variable "Alert On" populates $env:alerton; use it when present and valid (case-insensitive)
+if ($null -ne $env:alerton -and -not [string]::IsNullOrWhiteSpace($env:alerton)) {
+  $alertVal = $env:alerton.Trim()
+  if ($alertVal -ieq 'Idle Time Lesser') { $AlertOn = 'Idle Time Lesser' }
+  elseif ($alertVal -ieq 'Idle Time Greater') { $AlertOn = 'Idle Time Greater' }
 }
 
 function Test-IsElevated {
@@ -435,9 +448,19 @@ if (-not $eval) {
   $friendly = Format-Minutes $idleMin
 }
 
+# Alert condition: exit 1 when this is true (Idle Time Greater => idle >= threshold; Idle Time Lesser => idle < threshold)
+$alertConditionMet = $false
+if ($ThresholdMinutes -gt 0) {
+  if ($AlertOn -eq 'Idle Time Greater') { $alertConditionMet = ($idleMin -ge $ThresholdMinutes) }
+  else { $alertConditionMet = ($idleMin -lt $ThresholdMinutes) }
+}
+
 # 5) Optional: write to NinjaOne CFs
 try { Ninja-Property-Set idleTime $friendly } catch { Write-Verbose "Ninja-Property-Set failed: $_" }
-try { Ninja-Property-Set idleTimeStatus $idleMin } catch { Write-Verbose "Ninja-Property-Set failed: $_" }
+$idleStatusValue = if ($alertConditionMet) {
+  if ($AlertOn -eq 'Idle Time Greater') { "ALERT: Idle $idleMin min (>= $ThresholdMinutes)" } else { "ALERT: Idle $idleMin min (< $ThresholdMinutes)" }
+} else { $idleMin }
+try { Ninja-Property-Set idleTimeStatus $idleStatusValue } catch { Write-Verbose "Ninja-Property-Set failed: $_" }
 try { Ninja-Property-Set idleTimeMinutes $idleMin } catch { Write-Verbose "Ninja-Property-Set failed: $_" }
 
 # 6) Summary
@@ -449,7 +472,8 @@ $summary = [PSCustomObject]@{
   IdleMinutes        = $idleMin
   IdleTime           = $friendly
   ThresholdMinutes   = $ThresholdMinutes
-  ThresholdExceeded  = ($ThresholdMinutes -gt 0 -and $idleMin -ge $ThresholdMinutes)
+  AlertOn            = $AlertOn
+  ThresholdExceeded  = $alertConditionMet
   UsedFallback       = $usedFallback
 }
 
@@ -457,9 +481,13 @@ Write-Host "=== Summary ==="
 $null = ($summary | Format-List * | Out-String) | ForEach-Object { Write-Host $_ }
 
 # 7) Exit
-if ($ThresholdMinutes -gt 0 -and $idleMin -ge $ThresholdMinutes) {
-  try { Ninja-Property-Set idleTimeStatus "ALERT: Idle $idleMin min (>= $ThresholdMinutes)" } catch { Write-Verbose "Ninja-Property-Set failed: $_" }
-  Write-Error "Idle time threshold exceeded: $idleMin minutes (threshold: $ThresholdMinutes)."
+if ($alertConditionMet) {
+  $errMsg = if ($AlertOn -eq 'Idle Time Greater') {
+    "Idle time threshold exceeded: $idleMin minutes (threshold: $ThresholdMinutes)."
+  } else {
+    "Idle time below threshold: $idleMin minutes (threshold: $ThresholdMinutes)."
+  }
+  Write-Error $errMsg
   exit 1
 }
 exit 0
