@@ -1,0 +1,10 @@
+deviceId,scope,organizationId,locationId,systemName,organizationName,locationName,recurringMaintenanceEnableRecurringSchedule,recurringMaintenanceTimeToStart24hFormat,recurringMaintenanceTotalMinutesForMaintenanceMode,recurringMaintenanceScheduleType,recurringMaintenanceDayOfWeek,recurringMaintenanceDayOfMonth,recurringMaintenanceMonthlyDayOfWeek,recurringMaintenanceMonthlyOccurrence,recurringMaintenanceDateToStopApplyingRecurringSchedule,recurringMaintenanceSuppressScriptingAndTasks,recurringMaintenanceSuppressPatching,recurringMaintenanceSuppressAvScans,recurringMaintenanceSuppressConditionBasedAlerting
+12345,Device,,,,,,true,7200000,60,Weekly,"Monday, Wednesday",,,,2026-12-31,true,true,true,true
+12346,Device,,,,,,true,7200000,120,Daily,,,,,2026-12-31,true,true,false,true
+12347,Device,,,,,,true,7200000,180,Monthly,,15,,,2026-12-31,true,true,true,true
+12348,Device,,,,,,true,7200000,240,MonthlyDayOfWeek,,,,Tuesday,2,2026-12-31,true,true,true,true
+,Device,,,MY-PC-NAME,,,true,7200000,60,Weekly,"Monday, Wednesday",,,,2026-12-31,true,true,true,true
+,Organization,67890,,,,,true,10800000,90,Weekly,"Monday, Wednesday, Friday",,,,2026-12-31,true,true,true,true
+,Organization,,,My Organization Name,,,true,10800000,90,Weekly,"Monday, Wednesday, Friday",,,,2026-12-31,true,true,true,true
+,Location,,67891,,,,,true,7200000,60,Daily,,,,,,true,true,true,true
+,Location,,,,,Main Office,,true,7200000,60,Daily,,,,,,true,true,true,true
