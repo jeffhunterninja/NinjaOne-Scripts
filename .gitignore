@@ -13,3 +13,6 @@ Set-CustomFieldPatchingSchedule/mspdemo.csv
 Set-CustomFieldPatchingSchedule/NinjaOne-CustomFields-PatchingSchedule.csv
 Unauthorized Administrator Monitoring/Report-LocalAdmins.ps1
 .gitignore
+Guest Wifi Check/Set-WifiCheckCustomFieldsFromCsv.ps1
+Guest Wifi Check/WifiCheckCustomFields-Example.csv
+Guest Wifi Check/WifiCheckCustomFields-Example2.csv
