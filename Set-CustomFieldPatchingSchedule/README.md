@@ -15,8 +15,8 @@ All custom fields listed below must exist in NinjaOne at the desired level(s) be
 
 | Custom field name      | Type   | Inheritance        | Allowed values / format                                                                 | Notes |
 |-----------------------|-----------------|-----------------|------------------------------------------------------------------------------------------|-------|
-| `patchingRecurrence`  | TEXT or DROPDOWN| Org, Location, Device | `Daily`, `Weekly`, `Monthly` | For Daily/Weekly/Monthly logic. |
-| `patchingDay`         | TEXT or DROPDOWN| Org, Location, Device | Day name: Sunday, Monday, Tuesday, Wednesday, Thursday, Friday, Saturday | Not used for Daily. |
+| `patchingRecurrence`  | DROPDOWN| Org, Location, Device | `Daily`, `Weekly`, `Monthly` | For Daily/Weekly/Monthly logic. |
+| `patchingDay`         | DROPDOWN| Org, Location, Device | Day name: Sunday, Monday, Tuesday, Wednesday, Thursday, Friday, Saturday | Not used for Daily. |
 | `patchingOccurrence`  | TEXT or DROPDOWN | Org, Location, Device | `1`, `2`, `3`, `4`, or `Last` (e.g. 2 = 2nd Tuesday of month) | Only when recurrence is Monthly. |
 | `patchingStart`       | **TEXT** | Org, Location, Device | Store HH:mm (e.g. `15:33`); run Set script with `-PatchingStartAsLocalTime`; Check uses it as device local time (same wall-clock time on every device). | Use TIME for one global patch time; use TEXT + `-PatchingStartAsLocalTime` for "3:33 PM in each device's timezone". |
 | `disablePatching`     | **CHECKBOX**    | Org, Location, Device | In CSV: `true`/`false`, `1`/`0`, or `yes`/`no`. When checked/true, Check script exits 1 and patching is skipped. | Create as CHECKBOX if used. |
