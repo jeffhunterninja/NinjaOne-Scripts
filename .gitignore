@@ -11,3 +11,5 @@ Set-CustomFieldMaintenanceWindow/NinjaOne-CustomFields-MaintenanceWindow.csv
 Set-CustomFieldPatchingSchedule/config.json
 Set-CustomFieldPatchingSchedule/mspdemo.csv
 Set-CustomFieldPatchingSchedule/NinjaOne-CustomFields-PatchingSchedule.csv
+Unauthorized Administrator Monitoring/Report-LocalAdmins.ps1
+.gitignore
