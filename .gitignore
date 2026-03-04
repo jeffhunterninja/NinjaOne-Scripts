@@ -6,3 +6,8 @@
 Activity Discrepancy Comparison/Compare-IITActivities.ps1
 Activity Discrepancy Comparison/Compare-MSPActivities.ps1
 NinjaOne-Scripts.code-workspace
+Set-CustomFieldMaintenanceWindow/config.json
+Set-CustomFieldMaintenanceWindow/NinjaOne-CustomFields-MaintenanceWindow.csv
+Set-CustomFieldPatchingSchedule/config.json
+Set-CustomFieldPatchingSchedule/mspdemo.csv
+Set-CustomFieldPatchingSchedule/NinjaOne-CustomFields-PatchingSchedule.csv
