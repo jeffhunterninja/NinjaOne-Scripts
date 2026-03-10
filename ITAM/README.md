@@ -2,6 +2,8 @@
 
 Standalone PowerShell WPF application that combines equipment import (CSV or manual entry), device QR code generation, QR upload to devices as related items, and scan-and-assign (user + device QR codes → set device owner). Uses OAuth Authorization Code + PKCE; session state flows between tabs (e.g. imported device IDs pre-fill QR generation; QR output directory pre-fills the upload tab).
 
+***Note as of March 10th:*** You can consider this script to be in "early access" - I've tested it, but there can be great variations in how teams structure their ITAM setup. There is at least one bug with assigning users that I know of, but it really only impacts users who are both end users and technician accounts. I hope to fix this tomorrow.
+
 **Script:** [Invoke-NinjaITAMManager.ps1](Invoke-NinjaITAMManager.ps1)
 
 ## Prerequisites
