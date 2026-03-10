@@ -24,7 +24,8 @@
 
 .PARAMETER ClientId
     OAuth application Client ID (Native / Authorization Code type).
-    Default: env:NinjaOneClientId.
+    Default: env:NinjaOneClientId. If neither the parameter nor the env var is set,
+    the user is prompted in the UI before sign-in.
 
 .EXAMPLE
     .\Invoke-NinjaITAMManager.ps1
@@ -52,11 +53,12 @@ $script:AccessToken      = $null
 $script:RefreshToken     = $null
 $script:TokenExpiresAt   = [datetime]::MinValue
 $script:NinjaBaseUrl     = ''
-$script:NinjaClientId    = ''
+$script:NinjaClientId    = $ClientId
 
 $script:AuthPS           = $null
 $script:AuthHandle       = $null
 $script:AuthVerifier     = $null
+$script:AuthState        = $null
 $script:AuthRedirectUri  = $null
 $script:AuthListener     = $null
 
@@ -96,20 +98,46 @@ function Get-PkceChallenge {
     return [Convert]::ToBase64String($hash) -replace '\+','-' -replace '/','_' -replace '=',''
 }
 
+function New-OAuthState {
+    return New-PkceVerifier
+}
+
+function ConvertTo-SecureToken {
+    param([string]$PlainToken)
+    return ($PlainToken | ConvertTo-SecureString -AsPlainText -Force)
+}
+
+function ConvertFrom-SecureToken {
+    param([securestring]$SecureToken)
+    return [System.Net.NetworkCredential]::new('', $SecureToken).Password
+}
+
+function Test-RefreshTokenPresent {
+    return ($null -ne $script:RefreshToken -and $script:RefreshToken.Length -gt 0)
+}
+
 function Test-TokenValid {
     return ($null -ne $script:AccessToken -and [datetime]::UtcNow -lt $script:TokenExpiresAt)
 }
 
 function Update-TokensFromResponse {
     param($Response)
-    $script:AccessToken = $Response.access_token
-    if ($Response.refresh_token) { $script:RefreshToken = $Response.refresh_token }
+    $accessProp = $Response.PSObject.Properties['access_token']
+    if ($null -eq $accessProp -or [string]::IsNullOrWhiteSpace($accessProp.Value)) {
+        throw "Token response did not include an access_token."
+    }
+    $script:AccessToken = ConvertTo-SecureToken $accessProp.Value
+
+    $refreshProp = $Response.PSObject.Properties['refresh_token']
+    if ($null -ne $refreshProp -and -not [string]::IsNullOrWhiteSpace($refreshProp.Value)) {
+        $script:RefreshToken = ConvertTo-SecureToken $refreshProp.Value
+    }
     $exp = if ($Response.expires_in) { [int]$Response.expires_in } else { 3600 }
     $script:TokenExpiresAt = [datetime]::UtcNow.AddSeconds($exp - 60)
 }
 
 function Invoke-TokenRefresh {
-    if ([string]::IsNullOrWhiteSpace($script:RefreshToken)) {
+    if (-not (Test-RefreshTokenPresent)) {
         throw "No refresh token. Please sign in again."
     }
     $resp = Invoke-RestMethod -Uri "$($script:NinjaBaseUrl)/ws/oauth/token" `
@@ -120,7 +148,7 @@ function Invoke-TokenRefresh {
         } `
         -Body @{
             grant_type    = 'refresh_token'
-            refresh_token = $script:RefreshToken
+            refresh_token = (ConvertFrom-SecureToken $script:RefreshToken)
             client_id     = $script:NinjaClientId
         }
     Update-TokensFromResponse $resp
@@ -140,19 +168,47 @@ function Invoke-NinjaApi {
         UseBasicParsing = $true
         ErrorAction     = 'Stop'
         Headers         = @{
-            'Authorization' = "Bearer $($script:AccessToken)"
+            'Authorization' = "Bearer $(ConvertFrom-SecureToken $script:AccessToken)"
             'Accept'        = 'application/json'
         }
     }
-    if ($Body -and $Method -ne 'GET') {
-        $p.ContentType = 'application/json'
-        $p.Body = ($Body | ConvertTo-Json -Depth 10)
+    if ($Method -ne 'GET') {
+        if ($Body) {
+            $p.ContentType = 'application/json'
+            $p.Body = ($Body | ConvertTo-Json -Depth 10)
+        } else {
+            $p.ContentType = 'application/json'
+            $p.Body = '{}'
+        }
     }
     return Invoke-RestMethod @p
 }
 
+function ConvertTo-ListItems {
+    param(
+        [Parameter(Mandatory)] $Response
+    )
+    if ($Response -is [Array]) {
+        return @($Response)
+    }
+
+    $psObj = $Response.PSObject
+    if ($psObj) {
+        foreach ($propName in @('data', 'items', 'organizations', 'locations', 'roles', 'list')) {
+            if ($psObj.Properties[$propName]) {
+                $value = $Response.$propName
+                if ($value -is [Array]) {
+                    return @($value)
+                }
+            }
+        }
+    }
+
+    return @($Response)
+}
+
 function Test-SignedIn {
-    if (-not (Test-TokenValid) -and [string]::IsNullOrWhiteSpace($script:RefreshToken)) {
+    if (-not (Test-TokenValid) -and -not (Test-RefreshTokenPresent)) {
         $lblStatus.Text = 'Not signed in. Please sign in first.'
         [System.Media.SystemSounds]::Hand.Play()
         return $false
@@ -164,61 +220,168 @@ function Ensure-ApiCaches {
     if ($null -eq $script:OrgCache) {
         $lblStatus.Text = 'Loading organizations...'
         Push-UIUpdate
-        $script:OrgCache = @(Invoke-NinjaApi -Endpoint 'organizations')
+        $orgResp = Invoke-NinjaApi -Endpoint 'organizations'
+        $script:OrgCache = ConvertTo-ListItems -Response $orgResp
     }
     if ($null -eq $script:LocationCache) {
         $lblStatus.Text = 'Loading locations...'
         Push-UIUpdate
-        $script:LocationCache = @(Invoke-NinjaApi -Endpoint 'locations')
+        $locResp = Invoke-NinjaApi -Endpoint 'locations'
+        $script:LocationCache = ConvertTo-ListItems -Response $locResp
     }
     if ($null -eq $script:RoleCache) {
         $lblStatus.Text = 'Loading device roles...'
         Push-UIUpdate
-        $allRoles = @(Invoke-NinjaApi -Endpoint 'noderole/list')
+        $rolesResp = Invoke-NinjaApi -Endpoint 'noderole/list'
+        $allRoles = ConvertTo-ListItems -Response $rolesResp
         $script:RoleCache = @($allRoles | Where-Object { $_.nodeClass -eq 'UNMANAGED_DEVICE' })
     }
 }
 
+function ConvertTo-ScalarString {
+    param(
+        [Parameter(Mandatory = $false)]
+        $Value
+    )
+
+    if ($null -eq $Value) { return $null }
+
+    $current = $Value
+    while ($current -is [System.Array] -and $current.Count -gt 0) {
+        $current = $current | Where-Object { $_ -ne $null -and -not [string]::IsNullOrWhiteSpace($_.ToString()) } | Select-Object -First 1
+        if ($null -eq $current) { break }
+    }
+
+    if ($null -eq $current) { return $null }
+
+    $s = $current -as [string]
+    if ([string]::IsNullOrWhiteSpace($s)) { return $null }
+    return $s.Trim()
+}
+
+# Resolves a user/contact by numeric ID. When the same ID exists in both users and contacts,
+# we prefer the contact when the user has userType TECHNICIAN so Scan & Assign assigns to the end user.
 function Find-UserById {
     param([int]$UserId)
     try {
         $allUsers = @(Invoke-NinjaApi -Endpoint 'users')
         $m = $allUsers | Where-Object { $_.id -eq $UserId } | Select-Object -First 1
         if ($m) {
-            $n = (@($m.firstname, $m.lastname) | Where-Object { $_ }) -join ' '
-            return [PSCustomObject]@{
-                Id    = $m.id
-                Uid   = if ($m.uid) { $m.uid } else { $m.id }
-                Name  = if ($n) { $n } else { "User $UserId" }
-                Email = $m.email
+            $userType = if ($m.PSObject.Properties['userType']) { $m.userType } else { $null }
+            if ($userType -eq 'END_USER') {
+                $first = ConvertTo-ScalarString -Value $m.firstname
+                $last  = ConvertTo-ScalarString -Value $m.lastname
+                $email = ConvertTo-ScalarString -Value $m.email
+                $uid   = ConvertTo-ScalarString -Value $m.uid
+                $nameParts = @()
+                if ($first) { $nameParts += $first }
+                if ($last)  { $nameParts += $last }
+                $n = $nameParts -join ' '
+                if ([string]::IsNullOrWhiteSpace($n)) { $n = "User $UserId" }
+                return [PSCustomObject]@{ Id = $m.id; Uid = if ($uid) { $uid } else { $m.id }; Name = $n; Email = $email }
             }
+            # User is TECHNICIAN or other; when same ID exists in contacts, prefer contact so assignment goes to end user.
+            try {
+                $allContacts = @(Invoke-NinjaApi -Endpoint 'contacts')
+                $c = $allContacts | Where-Object { $_.id -eq $UserId } | Select-Object -First 1
+                if ($c) {
+                    $first = ConvertTo-ScalarString -Value $c.firstname
+                    $last  = ConvertTo-ScalarString -Value $c.lastname
+                    $nameField = ConvertTo-ScalarString -Value $c.name
+                    $email = ConvertTo-ScalarString -Value $c.email
+                    $uid   = ConvertTo-ScalarString -Value $c.uid
+                    $nameParts = @()
+                    if ($first) { $nameParts += $first }
+                    if ($last)  { $nameParts += $last }
+                    $n = $nameParts -join ' '
+                    if ([string]::IsNullOrWhiteSpace($n)) { $n = if ($nameField) { $nameField } else { "Contact $UserId" } }
+                    return [PSCustomObject]@{ Id = $c.id; Uid = if ($uid) { $uid } else { $c.id }; Name = $n; Email = $email }
+                }
+            } catch {
+                Write-Verbose "Contacts lookup for ID ${UserId} (technician fallback): $($_.Exception.Message)"
+            }
+            # No contact with this ID; return the user.
+            $first = ConvertTo-ScalarString -Value $m.firstname
+            $last  = ConvertTo-ScalarString -Value $m.lastname
+            $email = ConvertTo-ScalarString -Value $m.email
+            $uid   = ConvertTo-ScalarString -Value $m.uid
+            $nameParts = @()
+            if ($first) { $nameParts += $first }
+            if ($last)  { $nameParts += $last }
+            $n = $nameParts -join ' '
+            if ([string]::IsNullOrWhiteSpace($n)) { $n = "User $UserId" }
+            return [PSCustomObject]@{ Id = $m.id; Uid = if ($uid) { $uid } else { $m.id }; Name = $n; Email = $email }
         }
-    } catch { }
+    } catch {
+        Write-Verbose "Failed user lookup in users endpoint for ID ${UserId}: $($_.Exception.Message)"
+    }
     try {
         $allContacts = @(Invoke-NinjaApi -Endpoint 'contacts')
         $m = $allContacts | Where-Object { $_.id -eq $UserId } | Select-Object -First 1
         if ($m) {
-            $n = (@($m.firstname, $m.lastname) | Where-Object { $_ }) -join ' '
-            if (-not $n -and $m.name) { $n = $m.name }
+            $first = ConvertTo-ScalarString -Value $m.firstname
+            $last  = ConvertTo-ScalarString -Value $m.lastname
+            $nameField = ConvertTo-ScalarString -Value $m.name
+            $email = ConvertTo-ScalarString -Value $m.email
+            $uid   = ConvertTo-ScalarString -Value $m.uid
+
+            $nameParts = @()
+            if ($first) { $nameParts += $first }
+            if ($last)  { $nameParts += $last }
+            $n = $nameParts -join ' '
+            if ([string]::IsNullOrWhiteSpace($n)) {
+                $n = if ($nameField) { $nameField } else { "Contact $UserId" }
+            }
+
             return [PSCustomObject]@{
                 Id    = $m.id
-                Uid   = if ($m.uid) { $m.uid } else { $m.id }
-                Name  = if ($n) { $n } else { "Contact $UserId" }
-                Email = $m.email
+                Uid   = if ($uid) { $uid } else { $m.id }
+                Name  = $n
+                Email = $email
             }
         }
-    } catch { }
+    } catch {
+        Write-Verbose "Failed user lookup in contacts endpoint for ID ${UserId}: $($_.Exception.Message)"
+    }
     return $null
 }
 
 function Get-DeviceInfo {
     param([int]$DeviceId)
     $d = Invoke-NinjaApi -Endpoint "device/$DeviceId"
-    $name = if ($d.displayName) { $d.displayName }
-            elseif ($d.systemName) { $d.systemName }
-            else { "Device $DeviceId" }
+    if (-not $d) {
+        throw "API returned no data for device $DeviceId"
+    }
+
+    # Use PSObject.Properties so missing properties don't throw under Set-StrictMode
+    $displayNameProp = $d.PSObject.Properties['displayName']
+    $systemNameProp  = $d.PSObject.Properties['systemName']
+    $idProp          = $d.PSObject.Properties['id']
+
+    $displayName = if ($displayNameProp) {
+        ConvertTo-ScalarString -Value $displayNameProp.Value
+    } else {
+        $null
+    }
+
+    $systemName = if ($systemNameProp) {
+        ConvertTo-ScalarString -Value $systemNameProp.Value
+    } else {
+        $null
+    }
+
+    $name = if ($displayName) {
+        $displayName
+    } elseif ($systemName) {
+        $systemName
+    } else {
+        "Device $DeviceId"
+    }
+
+    $resolvedId = if ($idProp -and $null -ne $idProp.Value) { $idProp.Value } else { $DeviceId }
+
     return [PSCustomObject]@{
-        Id   = $d.id
+        Id   = $resolvedId
         Name = $name
     }
 }
@@ -241,12 +404,108 @@ function Get-DateToUnixSeconds {
     return [int]($Date.ToUniversalTime() - [datetime]'1970-01-01').TotalSeconds
 }
 
+function ConvertTo-UnixMilliseconds {
+    param([datetime]$Date)
+    return [int64](($Date.ToUniversalTime() - [datetime]'1970-01-01').TotalSeconds * 1000)
+}
+
+function ConvertTo-OptionalDateParseResult {
+    param(
+        [string]$Value
+    )
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return [PSCustomObject]@{ Success = $true; Date = $null; Message = $null }
+    }
+    try {
+        return [PSCustomObject]@{ Success = $true; Date = [datetime]$Value; Message = $null }
+    } catch {
+        return [PSCustomObject]@{
+            Success = $false
+            Date    = $null
+            Message = "Invalid date '$Value'. Expected a valid date such as YYYY-MM-DD."
+        }
+    }
+}
+
+function ConvertTo-OptionalIntAmountParseResult {
+    param(
+        [string]$Value
+    )
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return [PSCustomObject]@{ Success = $true; Amount = $null; Message = $null }
+    }
+    if ($Value -match '^\d+(\.\d+)?$') {
+        return [PSCustomObject]@{ Success = $true; Amount = [int][double]$Value; Message = $null }
+    }
+    return [PSCustomObject]@{
+        Success = $false
+        Amount  = $null
+        Message = "Invalid amount '$Value'. Use numeric values only."
+    }
+}
+
+function Build-UnmanagedDeviceBody {
+    param(
+        [string]$DisplayName,
+        [int]$RoleId,
+        [int]$OrgId,
+        [int]$LocationId,
+        [datetime]$WarrantyStart,
+        [datetime]$WarrantyEnd,
+        [string]$Serial
+    )
+    return @{
+        name              = $DisplayName
+        roleId            = $RoleId
+        orgId             = $OrgId
+        locationId        = $LocationId
+        warrantyStartDate = (Get-DateToUnixSeconds -Date $WarrantyStart)
+        warrantyEndDate   = (Get-DateToUnixSeconds -Date $WarrantyEnd)
+        serialNumber      = $Serial
+    }
+}
+
+function Build-AssetCustomFieldsBody {
+    param(
+        [string]$Make,
+        [string]$Model,
+        [string]$Serial,
+        [string]$AssetStatus,
+        [string]$ExpectedLifetime,
+        [datetime]$PurchaseDate,
+        [datetime]$EndOfLifeDate,
+        [int]$PurchaseAmount
+    )
+
+    $cf = @{}
+    if ($Make)   { $cf['manufacturer'] = $Make }
+    if ($Model)  { $cf['model'] = $Model }
+    if ($Serial) { $cf['itamAssetSerialNumber'] = $Serial }
+    if ($PurchaseDate) {
+        $cf['itamAssetPurchaseDate'] = (ConvertTo-UnixMilliseconds -Date $PurchaseDate)
+    }
+    if ($PurchaseAmount -ne $null) {
+        $cf['itamAssetPurchaseAmount'] = $PurchaseAmount
+    }
+    if ($AssetStatus) {
+        $cf['itamAssetStatus'] = $AssetStatus
+    }
+    if ($ExpectedLifetime) {
+        $cf['itamAssetExpectedLifetime'] = $ExpectedLifetime.ToLower()
+    }
+    if ($EndOfLifeDate) {
+        $cf['itamAssetEndOfLifeDate'] = (ConvertTo-UnixMilliseconds -Date $EndOfLifeDate)
+    }
+    return $cf
+}
+
 function Get-RowValue {
     param([PSCustomObject]$Row, [string]$ColumnName)
     $prop = $Row.PSObject.Properties | Where-Object { $_.Name -ieq $ColumnName } | Select-Object -First 1
     if (-not $prop) { return '' }
     $v = $prop.Value -as [string]
-    return if ($null -eq $v) { '' } else { $v.Trim() }
+    if ($null -eq $v) { return '' }
+    return $v.Trim()
 }
 
 function ConvertTo-DataTable {
@@ -389,6 +648,9 @@ $xaml = @"
                     <RowDefinition Height="32"/>
                     <RowDefinition Height="32"/>
                     <RowDefinition Height="32"/>
+                    <RowDefinition Height="32"/>
+                    <RowDefinition Height="32"/>
+                    <RowDefinition Height="32"/>
                   </Grid.RowDefinitions>
                   <TextBlock Grid.Row="0" Text="Name *" VerticalAlignment="Center"/>
                   <TextBox Grid.Row="0" Grid.Column="1" x:Name="tbManualName"
@@ -424,6 +686,17 @@ $xaml = @"
                            ToolTip="YYYY-MM-DD"/>
                   <TextBlock Grid.Row="10" Text="Warranty End" VerticalAlignment="Center"/>
                   <TextBox Grid.Row="10" Grid.Column="1" x:Name="tbManualWarrantyEnd"
+                           Height="26" VerticalContentAlignment="Center"
+                           ToolTip="YYYY-MM-DD"/>
+                  <TextBlock Grid.Row="11" Text="Asset Status" VerticalAlignment="Center"/>
+                  <TextBox Grid.Row="11" Grid.Column="1" x:Name="tbManualAssetStatus"
+                           Height="26" VerticalContentAlignment="Center"
+                           ToolTip="e.g. In Use, Retired"/>
+                  <TextBlock Grid.Row="12" Text="Expected Life" VerticalAlignment="Center"/>
+                  <ComboBox Grid.Row="12" Grid.Column="1" x:Name="cbManualExpLifetime"
+                            Height="26"/>
+                  <TextBlock Grid.Row="13" Text="End of Life" VerticalAlignment="Center"/>
+                  <TextBox Grid.Row="13" Grid.Column="1" x:Name="tbManualEolDate"
                            Height="26" VerticalContentAlignment="Center"
                            ToolTip="YYYY-MM-DD"/>
                 </Grid>
@@ -654,6 +927,9 @@ $tbManualPurchDate   = $window.FindName('tbManualPurchDate')
 $tbManualAmount      = $window.FindName('tbManualAmount')
 $tbManualWarrantyStart = $window.FindName('tbManualWarrantyStart')
 $tbManualWarrantyEnd = $window.FindName('tbManualWarrantyEnd')
+$tbManualAssetStatus = $window.FindName('tbManualAssetStatus')
+$cbManualExpLifetime = $window.FindName('cbManualExpLifetime')
+$tbManualEolDate     = $window.FindName('tbManualEolDate')
 $btnManualAdd        = $window.FindName('btnManualAdd')
 $lbImportResults     = $window.FindName('lbImportResults')
 $lblImportCount      = $window.FindName('lblImportCount')
@@ -694,7 +970,7 @@ $btnScanReset        = $window.FindName('btnScanReset')
 
 #region Initialize Defaults
 $tbInstance.Text = $NinjaOneInstance
-if ($ClientId) { $tbClientId.Text = $ClientId }
+$tbClientId.Text = if ($ClientId) { $ClientId } else { '' }
 $hasDefaults = -not [string]::IsNullOrWhiteSpace($ClientId) -and `
                -not [string]::IsNullOrWhiteSpace($NinjaOneInstance)
 $expSettings.IsExpanded = -not $hasDefaults
@@ -704,6 +980,10 @@ foreach ($size in @(100, 150, 200, 250, 300, 400, 500, 600)) {
     $cbQrSize.Items.Add("${size}px") | Out-Null
 }
 $cbQrSize.SelectedIndex = 2
+
+foreach ($yr in @('1 years', '2 years', '3 years', '4 years', '5 years')) {
+    $cbManualExpLifetime.Items.Add($yr) | Out-Null
+}
 #endregion
 
 #region UI Helpers
@@ -763,10 +1043,10 @@ $btnSignIn.Add_Click({
     Push-UIUpdate
 
     $script:AuthVerifier = New-PkceVerifier
+    $script:AuthState = New-OAuthState
     $challenge = Get-PkceChallenge -Verifier $script:AuthVerifier
 
-    $port = Get-Random -Minimum 49152 -Maximum 65535
-    $script:AuthRedirectUri = "http://localhost:$port/callback/"
+    $script:AuthRedirectUri = "http://localhost:8888/"
 
     $script:AuthListener = [System.Net.HttpListener]::new()
     $script:AuthListener.Prefixes.Add($script:AuthRedirectUri)
@@ -780,11 +1060,15 @@ $btnSignIn.Add_Click({
         return
     }
 
+    $scopes = 'monitoring management offline_access'
+    $scopeEncoded = [uri]::EscapeDataString($scopes)
+
     $authorizeUrl = "$($script:NinjaBaseUrl)/ws/oauth/authorize?" +
         "response_type=code" +
         "&client_id=$([uri]::EscapeDataString($script:NinjaClientId))" +
         "&redirect_uri=$([uri]::EscapeDataString($script:AuthRedirectUri))" +
-        "&scope=monitoring%20management" +
+        "&scope=$scopeEncoded" +
+        "&state=$([uri]::EscapeDataString($script:AuthState))" +
         "&code_challenge=$challenge" +
         "&code_challenge_method=S256"
 
@@ -807,7 +1091,7 @@ $btnSignIn.Add_Click({
             $lst.Stop()
             return $q
         } catch {
-            try { $lst.Stop() } catch { }
+            try { $lst.Stop() } catch { Write-Verbose "Auth listener stop failed: $($_.Exception.Message)" }
             return "error=$($_.Exception.Message)"
         }
     }).AddArgument($script:AuthListener)
@@ -826,10 +1110,21 @@ $btnSignIn.Add_Click({
             $script:AuthPS.Dispose()
             $script:AuthPS = $null
 
+            $returnedState = $null
+            if ($queryString -match '[?&]state=([^&]+)') {
+                $returnedState = [uri]::UnescapeDataString($Matches[1])
+            }
+
             if ($queryString -match '[?&]code=([^&]+)') {
+                if ([string]::IsNullOrWhiteSpace($script:AuthState) -or
+                    [string]::IsNullOrWhiteSpace($returnedState) -or
+                    $returnedState -ne $script:AuthState) {
+                    throw 'Authentication state validation failed. Please sign in again.'
+                }
                 $code = [uri]::UnescapeDataString($Matches[1])
+                $baseUrl = Resolve-BaseUrl -Instance $tbInstance.Text
                 $resp = Invoke-RestMethod `
-                    -Uri "$($script:NinjaBaseUrl)/ws/oauth/token" `
+                    -Uri "$baseUrl/ws/oauth/token" `
                     -Method POST -UseBasicParsing `
                     -Headers @{
                         'Accept'       = 'application/json'
@@ -844,6 +1139,7 @@ $btnSignIn.Add_Click({
                     }
 
                 Update-TokensFromResponse $resp
+                $script:NinjaBaseUrl = $baseUrl
                 $lblAuthStatus.Text = 'Connected'
                 $lblAuthStatus.Foreground = [System.Windows.Media.Brushes]::Green
                 $expSettings.IsExpanded = $false
@@ -864,10 +1160,16 @@ $btnSignIn.Add_Click({
                 $lblAuthStatus.Foreground = [System.Windows.Media.Brushes]::Red
                 $lblStatus.Text = 'Sign-in failed: no authorization code received.'
             }
+            $script:AuthState = $null
         } catch {
             $lblAuthStatus.Text = 'Error'
             $lblAuthStatus.Foreground = [System.Windows.Media.Brushes]::Red
-            $lblStatus.Text = "Authentication error: $($_.Exception.Message)"
+            $errMsg = $_.Exception.Message
+            if ($errMsg -match 'refresh_token') {
+                $lblStatus.Text = 'Authentication error: refresh token missing. Verify your OAuth app allows Refresh Token grant and offline_access scope.'
+            } else {
+                $lblStatus.Text = "Authentication error: $errMsg"
+            }
         }
         $btnSignIn.IsEnabled = $true
     })
@@ -890,12 +1192,26 @@ $rbManual.Add_Checked({
         Ensure-ApiCaches
         if ($cbManualOrg.Items.Count -eq 0) {
             foreach ($org in $script:OrgCache) {
-                $cbManualOrg.Items.Add($org.name) | Out-Null
+                $orgName = $org.name
+                if ($orgName -is [Array]) {
+                    $orgName = $orgName | Select-Object -First 1
+                }
+                $orgName = $orgName -as [string]
+                if (-not [string]::IsNullOrWhiteSpace($orgName)) {
+                    $cbManualOrg.Items.Add($orgName) | Out-Null
+                }
             }
         }
         if ($cbManualRole.Items.Count -eq 0) {
             foreach ($r in $script:RoleCache) {
-                $cbManualRole.Items.Add($r.name) | Out-Null
+                $roleName = $r.name
+                if ($roleName -is [Array]) {
+                    $roleName = $roleName | Select-Object -First 1
+                }
+                $roleName = $roleName -as [string]
+                if (-not [string]::IsNullOrWhiteSpace($roleName)) {
+                    $cbManualRole.Items.Add($roleName) | Out-Null
+                }
             }
         }
         $lblStatus.Text = 'Manual entry mode. Fill in the fields and click Add Device.'
@@ -917,7 +1233,14 @@ $cbManualOrg.Add_SelectionChanged({
         ($_.organizationID -eq $orgId) -or ($_.organizationId -eq $orgId)
     }
     foreach ($loc in $filteredLocs) {
-        $cbManualLoc.Items.Add($loc.name) | Out-Null
+        $locName = $loc.name
+        if ($locName -is [Array]) {
+            $locName = $locName | Select-Object -First 1
+        }
+        $locName = $locName -as [string]
+        if (-not [string]::IsNullOrWhiteSpace($locName)) {
+            $cbManualLoc.Items.Add($locName) | Out-Null
+        }
     }
     if ($cbManualLoc.Items.Count -gt 0) { $cbManualLoc.SelectedIndex = 0 }
 })
@@ -931,8 +1254,8 @@ $btnBrowseCsv.Add_Click({
         try {
             $script:CsvData = Import-Csv -LiteralPath $dlg.FileName -Encoding UTF8
             if ($script:CsvData -and $script:CsvData.Count -gt 0) {
-                $dt = ConvertTo-DataTable -Data $script:CsvData
-                $dgCsvPreview.ItemsSource = $dt.DefaultView
+                # Bind the CSV rows directly; DataGrid will auto-generate columns
+                $dgCsvPreview.ItemsSource = $script:CsvData
                 $lblStatus.Text = "Loaded $($script:CsvData.Count) row(s) from CSV. Click Import to create devices."
             } else {
                 $lblStatus.Text = 'CSV is empty or has no data rows.'
@@ -961,8 +1284,18 @@ $btnImportCsv.Add_Click({
     $created = 0
     $failed  = 0
     $errors  = [System.Collections.Generic.List[string]]::new()
+    $warnings = [System.Collections.Generic.List[string]]::new()
     $rowNum  = 0
     $total   = $script:CsvData.Count
+
+    $headerNames = @($script:CsvData[0].PSObject.Properties.Name)
+    $hasRoleHeader = $headerNames | Where-Object { $_ -ieq 'RoleName' } | Select-Object -First 1
+    if (-not $hasRoleHeader) {
+        $btnImportCsv.IsEnabled = $true
+        $lblStatus.Text = "CSV is missing required header 'RoleName'."
+        [System.Media.SystemSounds]::Hand.Play()
+        return
+    }
 
     foreach ($row in $script:CsvData) {
         $rowNum++
@@ -1029,50 +1362,73 @@ $btnImportCsv.Add_Click({
             $warrantyEnd   = (Get-Date).AddYears(3)
             $ws = Get-RowValue -Row $row -ColumnName 'WarrantyStartDate'
             $we = Get-RowValue -Row $row -ColumnName 'WarrantyEndDate'
-            if ($ws -and ([datetime]::TryParse($ws, [ref]$null))) {
-                $warrantyStart = [datetime]::Parse($ws)
+            $parsedWs = ConvertTo-OptionalDateParseResult -Value $ws
+            if ($parsedWs.Success) {
+                if ($parsedWs.Date) { $warrantyStart = $parsedWs.Date }
+            } else {
+                $warnings.Add("Row ${rowNum}: WarrantyStartDate - $($parsedWs.Message) Using current date.")
             }
-            if ($we -and ([datetime]::TryParse($we, [ref]$null))) {
-                $warrantyEnd = [datetime]::Parse($we)
+            $parsedWe = ConvertTo-OptionalDateParseResult -Value $we
+            if ($parsedWe.Success) {
+                if ($parsedWe.Date) { $warrantyEnd = $parsedWe.Date }
+            } else {
+                $warnings.Add("Row ${rowNum}: WarrantyEndDate - $($parsedWe.Message) Using +3 years default.")
             }
 
-            $body = @{
-                name              = $displayName
-                roleId            = $roleId
-                orgId             = $orgId
-                locationId        = $locId
-                warrantyStartDate = (Get-DateToUnixSeconds -Date $warrantyStart)
-                warrantyEndDate   = (Get-DateToUnixSeconds -Date $warrantyEnd)
-                serialNumber      = $serial
-            }
+            $assetStatus      = Get-RowValue -Row $row -ColumnName 'AssetStatus'
+            $expectedLifetime = Get-RowValue -Row $row -ColumnName 'ExpectedLifetime'
+            $eolStr           = Get-RowValue -Row $row -ColumnName 'EndOfLifeDate'
+            $make   = Get-RowValue -Row $row -ColumnName 'Make'
+            $model  = Get-RowValue -Row $row -ColumnName 'Model'
+            $purch  = Get-RowValue -Row $row -ColumnName 'PurchaseDate'
+            $amount = Get-RowValue -Row $row -ColumnName 'PurchaseAmount'
+
+            $body = Build-UnmanagedDeviceBody `
+                -DisplayName $displayName `
+                -RoleId $roleId `
+                -OrgId $orgId `
+                -LocationId $locId `
+                -WarrantyStart $warrantyStart `
+                -WarrantyEnd $warrantyEnd `
+                -Serial $serial
 
             $result = Invoke-NinjaApi -Method POST -Endpoint 'itam/unmanaged-device' -Body $body
             $nodeId = $result.nodeId
             if (-not $nodeId) { throw "API did not return a nodeId." }
 
-            $make   = Get-RowValue -Row $row -ColumnName 'Make'
-            $model  = Get-RowValue -Row $row -ColumnName 'Model'
-            $purch  = Get-RowValue -Row $row -ColumnName 'PurchaseDate'
-            $amount = Get-RowValue -Row $row -ColumnName 'PurchaseAmount'
-            if ($make -or $model -or $purch -or $amount -or $serial) {
-                $cf = @{}
-                if ($make)   { $cf['manufacturer'] = $make }
-                if ($model)  { $cf['model'] = $model }
-                if ($serial) { $cf['itamAssetSerialNumber'] = $serial }
-                if ($purch -and [datetime]::TryParse($purch, [ref]$null)) {
-                    $purchMs = [int64](([datetime]::Parse($purch).ToUniversalTime() -
-                        [datetime]'1970-01-01').TotalSeconds * 1000)
-                    $cf['itamAssetPurchaseDate'] = $purchMs
+            if ($make -or $model -or $purch -or $amount -or $serial `
+                -or $assetStatus -or $expectedLifetime -or $eolStr) {
+                $parsedPurch = ConvertTo-OptionalDateParseResult -Value $purch
+                if (-not $parsedPurch.Success) {
+                    $warnings.Add("Row ${rowNum}: PurchaseDate - $($parsedPurch.Message) Value skipped.")
                 }
-                if ($amount -and ($amount -match '^\d+(\.\d+)?$')) {
-                    $cf['itamAssetPurchaseAmount'] = [int][double]$amount
+                $parsedEol = ConvertTo-OptionalDateParseResult -Value $eolStr
+                if (-not $parsedEol.Success) {
+                    $warnings.Add("Row ${rowNum}: EndOfLifeDate - $($parsedEol.Message) Value skipped.")
                 }
+                $parsedAmount = ConvertTo-OptionalIntAmountParseResult -Value $amount
+                if (-not $parsedAmount.Success) {
+                    $warnings.Add("Row ${rowNum}: PurchaseAmount - $($parsedAmount.Message) Value skipped.")
+                }
+
+                $cf = Build-AssetCustomFieldsBody `
+                    -Make $make `
+                    -Model $model `
+                    -Serial $serial `
+                    -AssetStatus $assetStatus `
+                    -ExpectedLifetime $expectedLifetime `
+                    -PurchaseDate $parsedPurch.Date `
+                    -EndOfLifeDate $parsedEol.Date `
+                    -PurchaseAmount $parsedAmount.Amount
+
                 if ($cf.Count -gt 0) {
                     try {
                         Invoke-NinjaApi -Method PATCH `
                             -Endpoint "device/$nodeId/custom-fields" `
                             -Body $cf | Out-Null
-                    } catch { }
+                    } catch {
+                        $warnings.Add("Row ${rowNum}: Created device $nodeId but custom-fields update failed: $($_.Exception.Message)")
+                    }
                 }
             }
 
@@ -1092,8 +1448,17 @@ $btnImportCsv.Add_Click({
 
     $lblImportCount.Text = $script:ImportedDevices.Count.ToString()
     $summary = "Import complete. Created: $created, Failed: $failed."
-    if ($errors.Count -gt 0) {
-        $detail = $summary + "`r`n`r`nErrors:`r`n" + ($errors -join "`r`n")
+    if ($warnings.Count -gt 0) {
+        $summary += " Warnings: $($warnings.Count)."
+    }
+    if ($errors.Count -gt 0 -or $warnings.Count -gt 0) {
+        $detail = $summary
+        if ($errors.Count -gt 0) {
+            $detail += "`r`n`r`nErrors:`r`n" + ($errors -join "`r`n")
+        }
+        if ($warnings.Count -gt 0) {
+            $detail += "`r`n`r`nWarnings:`r`n" + ($warnings -join "`r`n")
+        }
         [System.Windows.MessageBox]::Show(
             $detail, 'Import Results', 'OK', 'Warning') | Out-Null
     } else {
@@ -1149,22 +1514,54 @@ $btnManualAdd.Add_Click({
     $warrantyEnd   = (Get-Date).AddYears(3)
     $ws = $tbManualWarrantyStart.Text.Trim()
     $we = $tbManualWarrantyEnd.Text.Trim()
-    if ($ws -and [datetime]::TryParse($ws, [ref]$null)) {
-        $warrantyStart = [datetime]::Parse($ws)
+    $parsedWs = ConvertTo-OptionalDateParseResult -Value $ws
+    if (-not $parsedWs.Success) {
+        $lblStatus.Text = "Invalid Warranty Start date. $($parsedWs.Message)"
+        [System.Media.SystemSounds]::Hand.Play()
+        return
     }
-    if ($we -and [datetime]::TryParse($we, [ref]$null)) {
-        $warrantyEnd = [datetime]::Parse($we)
+    if ($parsedWs.Date) { $warrantyStart = $parsedWs.Date }
+    $parsedWe = ConvertTo-OptionalDateParseResult -Value $we
+    if (-not $parsedWe.Success) {
+        $lblStatus.Text = "Invalid Warranty End date. $($parsedWe.Message)"
+        [System.Media.SystemSounds]::Hand.Play()
+        return
+    }
+    if ($parsedWe.Date) { $warrantyEnd = $parsedWe.Date }
+
+    $assetStatus      = $tbManualAssetStatus.Text.Trim()
+    $expectedLifetime = $cbManualExpLifetime.SelectedItem -as [string]
+    $eolStr           = $tbManualEolDate.Text.Trim()
+    $purch            = $tbManualPurchDate.Text.Trim()
+    $amount           = $tbManualAmount.Text.Trim()
+
+    $parsedPurch = ConvertTo-OptionalDateParseResult -Value $purch
+    if (-not $parsedPurch.Success) {
+        $lblStatus.Text = "Invalid Purchase Date. $($parsedPurch.Message)"
+        [System.Media.SystemSounds]::Hand.Play()
+        return
+    }
+    $parsedEol = ConvertTo-OptionalDateParseResult -Value $eolStr
+    if (-not $parsedEol.Success) {
+        $lblStatus.Text = "Invalid End of Life Date. $($parsedEol.Message)"
+        [System.Media.SystemSounds]::Hand.Play()
+        return
+    }
+    $parsedAmount = ConvertTo-OptionalIntAmountParseResult -Value $amount
+    if (-not $parsedAmount.Success) {
+        $lblStatus.Text = "Invalid Purchase Amount. $($parsedAmount.Message)"
+        [System.Media.SystemSounds]::Hand.Play()
+        return
     }
 
-    $body = @{
-        name              = $displayName
-        roleId            = $roleMatch.id
-        orgId             = $orgMatch.id
-        locationId        = $locMatch.id
-        warrantyStartDate = (Get-DateToUnixSeconds -Date $warrantyStart)
-        warrantyEndDate   = (Get-DateToUnixSeconds -Date $warrantyEnd)
-        serialNumber      = $serial
-    }
+    $body = Build-UnmanagedDeviceBody `
+        -DisplayName $displayName `
+        -RoleId $roleMatch.id `
+        -OrgId $orgMatch.id `
+        -LocationId $locMatch.id `
+        -WarrantyStart $warrantyStart `
+        -WarrantyEnd $warrantyEnd `
+        -Serial $serial
 
     $btnManualAdd.IsEnabled = $false
     $lblStatus.Text = "Creating device '$displayName'..."
@@ -1176,27 +1573,26 @@ $btnManualAdd.Add_Click({
         $nodeId = $result.nodeId
         if (-not $nodeId) { throw "API did not return a nodeId." }
 
-        $purch  = $tbManualPurchDate.Text.Trim()
-        $amount = $tbManualAmount.Text.Trim()
-        if ($make -or $model -or $purch -or $amount -or $serial) {
-            $cf = @{}
-            if ($make)   { $cf['manufacturer'] = $make }
-            if ($model)  { $cf['model'] = $model }
-            if ($serial) { $cf['itamAssetSerialNumber'] = $serial }
-            if ($purch -and [datetime]::TryParse($purch, [ref]$null)) {
-                $purchMs = [int64](([datetime]::Parse($purch).ToUniversalTime() -
-                    [datetime]'1970-01-01').TotalSeconds * 1000)
-                $cf['itamAssetPurchaseDate'] = $purchMs
-            }
-            if ($amount -and ($amount -match '^\d+(\.\d+)?$')) {
-                $cf['itamAssetPurchaseAmount'] = [int][double]$amount
-            }
+        $customFieldsWarning = $null
+        if ($make -or $model -or $purch -or $amount -or $serial `
+            -or $assetStatus -or $expectedLifetime -or $eolStr) {
+            $cf = Build-AssetCustomFieldsBody `
+                -Make $make `
+                -Model $model `
+                -Serial $serial `
+                -AssetStatus $assetStatus `
+                -ExpectedLifetime $expectedLifetime `
+                -PurchaseDate $parsedPurch.Date `
+                -EndOfLifeDate $parsedEol.Date `
+                -PurchaseAmount $parsedAmount.Amount
             if ($cf.Count -gt 0) {
                 try {
                     Invoke-NinjaApi -Method PATCH `
                         -Endpoint "device/$nodeId/custom-fields" `
                         -Body $cf | Out-Null
-                } catch { }
+                } catch {
+                    $customFieldsWarning = " Custom-fields update warning: $($_.Exception.Message)"
+                }
             }
         }
 
@@ -1208,7 +1604,7 @@ $btnManualAdd.Add_Click({
         $lbImportResults.Items.Add(
             "ID: $nodeId | $displayName ($roleName)") | Out-Null
         $lblImportCount.Text = $script:ImportedDevices.Count.ToString()
-        $lblStatus.Text = "Created '$displayName' (ID: $nodeId)."
+        $lblStatus.Text = "Created '$displayName' (ID: $nodeId).$customFieldsWarning"
         [System.Media.SystemSounds]::Asterisk.Play()
 
         $tbManualName.Clear()
@@ -1219,6 +1615,9 @@ $btnManualAdd.Add_Click({
         $tbManualAmount.Clear()
         $tbManualWarrantyStart.Clear()
         $tbManualWarrantyEnd.Clear()
+        $tbManualAssetStatus.Clear()
+        $cbManualExpLifetime.SelectedIndex = -1
+        $tbManualEolDate.Clear()
     } catch {
         $lblStatus.Text = "Failed to create device: $($_.Exception.Message)"
         [System.Media.SystemSounds]::Hand.Play()
@@ -1246,11 +1645,13 @@ $btnQrAddDevice.Add_Click({
     }
 
     $devName = "Device $devId"
-    if (Test-TokenValid -or -not [string]::IsNullOrWhiteSpace($script:RefreshToken)) {
+    if (Test-TokenValid -or (Test-RefreshTokenPresent)) {
         try {
             $info = Get-DeviceInfo -DeviceId $devId
             $devName = $info.Name
-        } catch { }
+        } catch {
+            $lblStatus.Text = "Device $devId added, but name lookup failed: $($_.Exception.Message)"
+        }
     }
 
     $lbQrDevices.Items.Add("ID: $devId | $devName") | Out-Null
@@ -1310,8 +1711,17 @@ $btnQrGenerate.Add_Click({
     if (-not [System.IO.Path]::IsPathRooted($outputDir)) {
         $outputDir = Join-Path -Path (Get-Location).Path -ChildPath $outputDir
     }
-    if (-not (Test-Path -LiteralPath $outputDir)) {
-        New-Item -Path $outputDir -ItemType Directory -Force | Out-Null
+    try {
+        if (-not (Test-Path -LiteralPath $outputDir)) {
+            New-Item -Path $outputDir -ItemType Directory -Force | Out-Null
+        }
+        if (-not (Test-Path -LiteralPath $outputDir -PathType Container)) {
+            throw "Output directory is not accessible: $outputDir"
+        }
+    } catch {
+        $lblStatus.Text = "Failed to prepare output directory: $($_.Exception.Message)"
+        [System.Media.SystemSounds]::Hand.Play()
+        return
     }
 
     $sizeText = $cbQrSize.SelectedItem -as [string]
@@ -1340,8 +1750,19 @@ $btnQrGenerate.Add_Click({
         $outPath = Join-Path $outputDir "Device_$devId.png"
 
         try {
-            $resp = Invoke-WebRequest -Uri $qrApiUrl -UseBasicParsing -ErrorAction Stop
-            [System.IO.File]::WriteAllBytes($outPath, $resp.Content)
+            Invoke-WebRequest -Uri $qrApiUrl -OutFile $outPath -UseBasicParsing -ErrorAction Stop
+            $fileInfo = Get-Item -LiteralPath $outPath -ErrorAction Stop
+            if ($fileInfo.Length -le 0) {
+                throw "Downloaded file is empty for Device $devId."
+            }
+            $fileBytes = [System.IO.File]::ReadAllBytes($outPath)
+            if ($fileBytes.Length -lt 8 -or
+                $fileBytes[0] -ne 137 -or $fileBytes[1] -ne 80 -or
+                $fileBytes[2] -ne 78 -or $fileBytes[3] -ne 71 -or
+                $fileBytes[4] -ne 13 -or $fileBytes[5] -ne 10 -or
+                $fileBytes[6] -ne 26 -or $fileBytes[7] -ne 10) {
+                throw "Downloaded file is not a valid PNG for Device $devId."
+            }
             $script:GeneratedQRFiles.Add([PSCustomObject]@{
                 DeviceId = $devId; Path = $outPath
             })
@@ -1430,8 +1851,8 @@ $btnUpload.Add_Click({
     $uploaded = 0
     $skipped  = 0
     $failedCount = 0
+    $warnings = [System.Collections.Generic.List[string]]::new()
     $total = $script:UploadFileMap.Count
-    $lf = "`r`n"
 
     for ($i = 0; $i -lt $total; $i++) {
         $item = $script:UploadFileMap[$i]
@@ -1448,21 +1869,38 @@ $btnUpload.Add_Click({
                        elseif ($listResp.PSObject.Properties['data']) { @($listResp.data) }
                        elseif ($listResp.PSObject.Properties['items']) { @($listResp.items) }
                        else { @($listResp) }
+            $targetName = [System.IO.Path]::GetFileNameWithoutExtension($fileInfo.Name)
             foreach ($ri in $riItems) {
-                $desc = $null
-                if ($ri.value -and $ri.value.PSObject.Properties['description']) {
-                    $desc = $ri.value.description
-                }
-                if ($desc -eq $description -and $null -ne $ri.id) {
+                if ($null -eq $ri.id) { continue }
+                if ($ri.relEntityType -ne 'ATTACHMENT') { continue }
+                $meta = $null
+                if ($ri.value -and $ri.value.PSObject.Properties['metadata']) { $meta = $ri.value.metadata }
+                if (-not $meta) { continue }
+                $metaName = if ($meta.PSObject.Properties['name']) { $meta.name } else { $null }
+                if ($metaName -and [string]::Equals($metaName, $targetName, [StringComparison]::OrdinalIgnoreCase)) {
                     $existingIds.Add([int]$ri.id)
                 }
             }
         } catch {
             $statusCode = 0
-            if ($_.Exception.Response) {
-                $statusCode = [int]$_.Exception.Response.StatusCode
+            $resp = $null
+            $ex = $_.Exception
+            if ($ex -ne $null) {
+                $respProp = $ex.PSObject.Properties['Response']
+                if ($respProp -and $respProp.Value) {
+                    $resp = $respProp.Value
+                }
             }
-            if ($statusCode -ne 404) { }
+            if ($resp -ne $null) {
+                try {
+                    $statusCode = [int]$resp.StatusCode
+                } catch {
+                    $statusCode = 0
+                }
+            }
+            if ($statusCode -ne 404) {
+                $warnings.Add("Device ${deviceId}: Failed to check existing attachments. $($_.Exception.Message)")
+            }
         }
 
         if ($existingIds.Count -gt 0 -and -not $replace) {
@@ -1478,7 +1916,9 @@ $btnUpload.Add_Click({
                 try {
                     Invoke-NinjaApi -Method DELETE `
                         -Endpoint "related-items/$rid" | Out-Null
-                } catch { }
+                } catch {
+                    $warnings.Add("Device ${deviceId}: Failed to remove existing related-item $rid. $($_.Exception.Message)")
+                }
             }
         }
 
@@ -1486,26 +1926,24 @@ $btnUpload.Add_Click({
             if (-not (Test-TokenValid)) { Invoke-TokenRefresh }
             $boundary = [System.Guid]::NewGuid().ToString()
             $fileBytes = [System.IO.File]::ReadAllBytes($fileInfo.FullName)
-            $fileContentEncoded = [System.Text.Encoding]::GetEncoding(
-                'iso-8859-1').GetString($fileBytes)
+            $enc = [System.Text.Encoding]::UTF8
+            $bodyParts = [System.Collections.Generic.List[byte]]::new()
 
-            $bodyLines = (
-                "--$boundary",
-                "content-disposition: form-data; name=`"description`"$lf",
-                $description,
-                "--$boundary",
-                "content-disposition: form-data; name=`"file`"; filename=`"$($fileInfo.Name)`"",
-                "content-type: image/png$lf",
-                $fileContentEncoded,
-                "--$boundary--$lf"
-            ) -join $lf
+            $preamble = "--$boundary`r`nContent-Disposition: form-data; name=`"description`"`r`n`r`n$description`r`n"
+            $bodyParts.AddRange([byte[]]$enc.GetBytes($preamble))
+            $filePartHeaders = "--$boundary`r`nContent-Disposition: form-data; name=`"file`"; filename=`"$($fileInfo.Name)`"`r`nContent-Type: image/png`r`n`r`n"
+            $bodyParts.AddRange([byte[]]$enc.GetBytes($filePartHeaders))
+            $bodyParts.AddRange([byte[]]$fileBytes)
+            $closing = "`r`n--$boundary--`r`n"
+            $bodyParts.AddRange([byte[]]$enc.GetBytes($closing))
 
+            $bodyBytes = $bodyParts.ToArray()
             $uploadUri = "$($script:NinjaBaseUrl)/ws/api/v2/related-items/entity/NODE/$deviceId/attachment"
             $contentType = "multipart/form-data; boundary=`"$boundary`""
 
             Invoke-RestMethod -Uri $uploadUri -Method POST `
-                -Headers @{ 'Authorization' = "Bearer $($script:AccessToken)" } `
-                -ContentType $contentType -Body $bodyLines `
+                -Headers @{ 'Authorization' = "Bearer $(ConvertFrom-SecureToken $script:AccessToken)" } `
+                -ContentType $contentType -Body $bodyBytes `
                 -UseBasicParsing -ErrorAction Stop | Out-Null
 
             $lbUploadFiles.Items.RemoveAt($i)
@@ -1521,7 +1959,15 @@ $btnUpload.Add_Click({
     }
 
     $summary = "Upload complete. Uploaded: $uploaded, Skipped: $skipped, Failed: $failedCount."
+    if ($warnings.Count -gt 0) {
+        $summary += " Warnings: $($warnings.Count)."
+    }
     $lblStatus.Text = $summary
+    if ($warnings.Count -gt 0) {
+        $detail = $summary + "`r`n`r`nWarnings:`r`n" + ($warnings -join "`r`n")
+        [System.Windows.MessageBox]::Show(
+            $detail, 'Upload Warnings', 'OK', 'Warning') | Out-Null
+    }
     if ($uploaded -gt 0) { [System.Media.SystemSounds]::Asterisk.Play() }
     $btnUpload.IsEnabled = $true
 })
@@ -1587,7 +2033,17 @@ $tbScanInput.Add_KeyDown({
         try {
             $deviceResult = Get-DeviceInfo -DeviceId $qr.Id
         } catch {
-            $lblStatus.Text = "Device $($qr.Id) not found or API error: $($_.Exception.Message)"
+            $requestUrl = "$($script:NinjaBaseUrl)/ws/api/v2/device/$($qr.Id)"
+            $errMsg = $_.Exception.Message
+            $innerMsg = if ($_.Exception.InnerException) { $_.Exception.InnerException.Message } else { '' }
+            $statusCode = ''
+            if ($_.Exception -is [System.Net.WebException] -and $_.Exception.Response) {
+                try { $statusCode = " HTTP status: $([int]$_.Exception.Response.StatusCode)" } catch { Write-Verbose "Unable to parse HTTP status code: $($_.Exception.Message)" }
+            }
+            $detail = "Device $($qr.Id) lookup failed.`r`n`r`nRequest URL:`r`n$requestUrl`r`n`r`nError:$statusCode`r`n$errMsg"
+            if ($innerMsg) { $detail += "`r`n`r`nInner: $innerMsg" }
+            $lblStatus.Text = "Device $($qr.Id) not found or API error. See details."
+            [System.Windows.MessageBox]::Show($detail, 'Device lookup failed', 'OK', 'Warning') | Out-Null
             [System.Media.SystemSounds]::Hand.Play()
             return
         }
@@ -1686,8 +2142,7 @@ $tabControl.Add_SelectionChanged({
         $lblStatus.Text = 'QR output directory pre-filled from Generate tab. Click Scan Directory to find files.'
     }
     elseif ($tab -eq $tabScan) {
-        if (Test-TokenValid -or `
-            -not [string]::IsNullOrWhiteSpace($script:RefreshToken)) {
+        if (Test-TokenValid -or (Test-RefreshTokenPresent)) {
             $tbScanInput.Focus()
         }
     }
@@ -1696,15 +2151,13 @@ $tabControl.Add_SelectionChanged({
 
 #region Window Events
 $window.Add_ContentRendered({
-    if (Test-TokenValid -or `
-        -not [string]::IsNullOrWhiteSpace($script:RefreshToken)) {
+    if (Test-TokenValid -or (Test-RefreshTokenPresent)) {
         $tbScanInput.Focus()
     }
 })
 
 $window.Add_Activated({
-    if ((Test-TokenValid -or `
-         -not [string]::IsNullOrWhiteSpace($script:RefreshToken)) `
+    if ((Test-TokenValid -or (Test-RefreshTokenPresent)) `
         -and -not $expSettings.IsExpanded) {
         $tab = $tabControl.SelectedItem
         if ($tab -eq $tabScan) { $tbScanInput.Focus() }
@@ -1713,12 +2166,25 @@ $window.Add_Activated({
 
 $window.Add_Closing({
     if ($script:AuthListener -and $script:AuthListener.IsListening) {
-        try { $script:AuthListener.Stop() } catch { }
+        try { $script:AuthListener.Stop() } catch { Write-Verbose "Auth listener stop during closing failed: $($_.Exception.Message)" }
     }
     if ($script:AuthPS) {
-        try { $script:AuthPS.Stop() } catch { }
-        try { $script:AuthPS.Dispose() } catch { }
+        try { $script:AuthPS.Stop() } catch { Write-Verbose "Auth runspace stop during closing failed: $($_.Exception.Message)" }
+        try { $script:AuthPS.Dispose() } catch { Write-Verbose "Auth runspace dispose during closing failed: $($_.Exception.Message)" }
     }
+
+    if ($script:AccessToken) {
+        $script:AccessToken.Dispose()
+        $script:AccessToken = $null
+    }
+    if ($script:RefreshToken) {
+        $script:RefreshToken.Dispose()
+        $script:RefreshToken = $null
+    }
+    $script:TokenExpiresAt = [datetime]::MinValue
+    $script:AuthVerifier   = $null
+    $script:AuthState      = $null
+    [System.GC]::Collect()
 })
 #endregion
 

@@ -1,0 +1,7 @@
+Name,ParentName,Icon
+Equipment,,faWrench
+Mouse,Equipment,faMousePointer
+Keyboard,Equipment,faKeyboard
+Displays,Equipment,faTv
+Headset,Equipment,faHeadphones
+Dock,Equipment,faPlug

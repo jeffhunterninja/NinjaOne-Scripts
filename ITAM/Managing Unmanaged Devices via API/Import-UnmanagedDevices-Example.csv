@@ -1,0 +1,6 @@
+Name,RoleName,OrganizationName,LocationName,SerialNumber,WarrantyStartDate,WarrantyEndDate,Make,Model,PurchaseDate,PurchaseAmount,AssetStatus,ExpectedLifetime,EndOfLifeDate
+Logitech MX Master 3,Mouse,Globex Corporation,Training Center,ABC123456,,,Logitech,MX Master 3,2025-01-15,99,In Use,3 years,2028-01-15
+Dell KB522 Wired,Keyboard,Globex Corporation,Training Center,,2025-01-01,2028-01-01,Dell,KB522,2025-01-10,45,,,
+Dell P2422H,Displays,Globex Corporation,Training Center,SN-MON-001,,,,,,,
+Jabra Evolve2 40,Headset,Globex Corporation,Remote,,,2026-12-31,Jabra,Evolve2 40,2025-02-01,250,In Use,2 years,2027-02-01
+CalDigit TS4,Dock,Globex Corporation,Training Center,,2025-01-01,2028-01-01,CalDigit,TS4,2025-01-05,399,,,
