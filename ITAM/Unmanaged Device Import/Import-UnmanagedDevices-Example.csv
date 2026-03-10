@@ -1,6 +1,0 @@
-Name,RoleName,OrganizationName,LocationName,SerialNumber,WarrantyStartDate,WarrantyEndDate,Make,Model,PurchaseDate,PurchaseAmount
-Logitech MX Master 3,Mouse,Contoso Ltd,Main Office,ABC123456,,,Logitech,MX Master 3,2025-01-15,99
-Dell KB522 Wired,Keyboard,Contoso Ltd,Main Office,,2025-01-01,2028-01-01,Dell,KB522,2025-01-10,45
-Dell P2422H,Displays,Contoso Ltd,Main Office,SN-MON-001,,,,,
-Jabra Evolve2 40,Headset,Contoso Ltd,Remote,,,2026-12-31,Jabra,Evolve2 40,2025-02-01,250
-CalDigit TS4,Dock,Contoso Ltd,Main Office,,2025-01-01,2028-01-01,CalDigit,TS4,2025-01-05,399
