@@ -84,23 +84,114 @@ function Invoke-NinjaOneApiInline {
         [string]$Query,
         $Body,
         [int]$TimeoutSec = 60,
+        [int]$MaxRetries = 4,
         [Parameter(Mandatory)] [PSCustomObject]$Session
     )
-    if (-not $Session.ExpiresAt -or (Get-Date) -ge $Session.ExpiresAt) {
-        throw 'No active session or token expired. Re-authenticate.'
+    function Get-HttpStatusCodeInline {
+        param($ErrorRecord)
+        try {
+            if ($ErrorRecord.Exception.Response -and $ErrorRecord.Exception.Response.StatusCode) {
+                return [int]$ErrorRecord.Exception.Response.StatusCode
+            }
+        } catch { }
+        return $null
     }
+
+    function Get-RetryAfterSecondsInline {
+        param($ErrorRecord)
+        try {
+            $resp = $ErrorRecord.Exception.Response
+            if ($resp -and $resp.Headers['Retry-After']) {
+                $raw = $resp.Headers['Retry-After'] | Select-Object -First 1
+                $sec = 0
+                if ([int]::TryParse($raw, [ref]$sec) -and $sec -gt 0) { return $sec }
+            }
+        } catch { }
+        return $null
+    }
+
+    function Refresh-NinjaSessionInline {
+        param([PSCustomObject]$TargetSession)
+        $token = Get-NinjaOAuthTokenInline -ClientId $TargetSession.ClientId -ClientSecret $TargetSession.ClientSecret -BaseUrl $TargetSession.BaseUrl
+        $TargetSession.AuthHeader = "Bearer $($token.access_token)"
+        $TargetSession.ExpiresAt = if ($token.expires_in) { (Get-Date).AddSeconds([int]$token.expires_in - 60) } else { (Get-Date).AddMinutes(55) }
+    }
+
+    if (-not $Session.ExpiresAt -or (Get-Date) -ge $Session.ExpiresAt) {
+        Refresh-NinjaSessionInline -TargetSession $Session
+    }
+
     $uri = if ($Query -and $Query.Length -gt 0) {
-        "$($Session.BaseUrl)/$($Endpoint.TrimStart('/'))?df=$Query"
+        "$($Session.BaseUrl)/$($Endpoint.TrimStart('/'))?$Query"
     } else {
         "$($Session.BaseUrl)/$($Endpoint.TrimStart('/'))"
     }
-    $headers = @{ Authorization = $Session.AuthHeader; 'Accept' = 'application/json' }
-    $bodyParam = $null
-    if ($Body) {
-        $bodyParam = $Body | ConvertTo-Json -Depth 100
-        $headers['Content-Type'] = 'application/json'
+
+    $attempt = 0
+    while ($true) {
+        $headers = @{ Authorization = $Session.AuthHeader; 'Accept' = 'application/json' }
+        $bodyParam = $null
+        if ($Body) {
+            $bodyParam = $Body | ConvertTo-Json -Depth 100
+            $headers['Content-Type'] = 'application/json'
+        }
+
+        try {
+            return Invoke-RestMethod -Uri $uri -Method $Method -Headers $headers -Body $bodyParam -TimeoutSec $TimeoutSec -ErrorAction Stop
+        } catch {
+            $status = Get-HttpStatusCodeInline -ErrorRecord $_
+            $attempt++
+
+            if ($status -eq 401 -and $attempt -le $MaxRetries) {
+                Refresh-NinjaSessionInline -TargetSession $Session
+                continue
+            }
+
+            $isRetryable = ($status -in @(408, 429, 500, 502, 503, 504))
+            if (-not $isRetryable -or $attempt -gt $MaxRetries) { throw }
+
+            $retryAfter = Get-RetryAfterSecondsInline -ErrorRecord $_
+            $sleepSec = if ($retryAfter -and $retryAfter -gt 0) {
+                [Math]::Min($retryAfter, 60)
+            } else {
+                [Math]::Min([Math]::Pow(2, $attempt), 30)
+            }
+            Write-Warning "Retrying $Method $Endpoint after HTTP $status in $sleepSec second(s) (attempt $attempt/$MaxRetries)."
+            Start-Sleep -Seconds $sleepSec
+        }
     }
-    return Invoke-RestMethod -Uri $uri -Method $Method -Headers $headers -Body $bodyParam -TimeoutSec $TimeoutSec -ErrorAction Stop
+}
+
+function ConvertTo-ApiItemArrayInline {
+    param($Response)
+    if ($null -eq $Response) { return @() }
+    if ($Response -is [Array]) { return @($Response) }
+    if ($Response.PSObject.Properties['data']) { return @($Response.data) }
+    if ($Response.PSObject.Properties['items']) { return @($Response.items) }
+    if ($Response.PSObject.Properties['results']) { return @($Response.results) }
+    return @($Response)
+}
+
+function Get-NinjaOnePagedInline {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string]$Endpoint,
+        [Parameter(Mandatory)] [PSCustomObject]$Session,
+        [int]$PageSize = 200,
+        [int]$MaxPages = 500
+    )
+    $out = [System.Collections.Generic.List[object]]::new()
+    $offset = 0
+    for ($page = 0; $page -lt $MaxPages; $page++) {
+        $resp = Invoke-NinjaOneApiInline -Method GET -Endpoint $Endpoint -Query "limit=$PageSize&offset=$offset" -Session $Session
+        $items = ConvertTo-ApiItemArrayInline -Response $resp
+        if ($items.Count -eq 0) { break }
+
+        foreach ($i in $items) { [void]$out.Add($i) }
+        if ($items.Count -lt $PageSize) { break }
+        $offset += $items.Count
+    }
+    return @($out)
 }
 
 function Get-DateToUnixSeconds {
@@ -169,7 +260,9 @@ $tokenResp = Get-NinjaOAuthTokenInline -ClientId $ClientId -ClientSecret $Client
 $Session = [PSCustomObject]@{
     BaseUrl    = $base
     AuthHeader = "Bearer $($tokenResp.access_token)"
-    ExpiresAt  = if ($tokenResp.expires_in) { (Get-Date).AddSeconds([int]$tokenResp.expires_in) } else { (Get-Date).AddHours(1) }
+    ExpiresAt  = if ($tokenResp.expires_in) { (Get-Date).AddSeconds([int]$tokenResp.expires_in - 60) } else { (Get-Date).AddMinutes(55) }
+    ClientId   = $ClientId
+    ClientSecret = $ClientSecret
 }
 
 # Validate CSV exists and load
@@ -218,9 +311,9 @@ if ((Test-RequiredColumns -Required $requiredById -Columns $allColumns)) {
 }
 
 # Cache: organizations, locations, unmanaged device roles
-$organizations = Invoke-NinjaOneApiInline -Method GET -Endpoint 'v2/organizations' -Session $Session
-$locations     = Invoke-NinjaOneApiInline -Method GET -Endpoint 'v2/locations' -Session $Session
-$rolesRaw      = Invoke-NinjaOneApiInline -Method GET -Endpoint 'v2/noderole/list' -Session $Session
+$organizations = Get-NinjaOnePagedInline -Endpoint 'v2/organizations' -Session $Session
+$locations     = Get-NinjaOnePagedInline -Endpoint 'v2/locations' -Session $Session
+$rolesRaw      = Get-NinjaOnePagedInline -Endpoint 'v2/noderole/list' -Session $Session
 $roles         = $rolesRaw | Where-Object { $_.nodeClass -eq 'UNMANAGED_DEVICE' }
 
 $created  = 0

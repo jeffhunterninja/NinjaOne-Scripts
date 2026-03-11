@@ -36,9 +36,6 @@
   If the device already has a related item with the same AttachmentDescription,
   delete it and upload the new image. Default is to skip when one already exists.
 
-.PARAMETER WhatIf
-  List discovered files and device IDs only; do not obtain a token or upload.
-
 .EXAMPLE
   .\Send-NinjaDeviceQRCodeToDevice.ps1 -ImageDirectory .\DeviceQRCodes
 
@@ -71,11 +68,7 @@ param(
 
     [Parameter()]
     [switch]
-    $Replace,
-
-    [Parameter()]
-    [switch]
-    $WhatIf
+    $Replace
 )
 
 $ErrorActionPreference = 'Stop'
@@ -103,14 +96,6 @@ foreach ($f in $imageFiles) {
 if ($fileToDeviceId.Count -eq 0) {
     Write-Error "No Device_*.png files found in: $resolvedImageDir"
     exit 2
-}
-
-if ($WhatIf) {
-    Write-Host "WhatIf: Would upload the following to NinjaOne (no token or upload performed):"
-    foreach ($item in $fileToDeviceId) {
-        Write-Host "  Device $($item.DeviceId) <- $($item.File.Name)"
-    }
-    exit 0
 }
 
 # --- Resolve credentials and base URL ---
@@ -189,6 +174,7 @@ foreach ($item in $fileToDeviceId) {
             continue
         }
         foreach ($rid in $existingIds) {
+            if (-not $PSCmdlet.ShouldProcess("Device $deviceId", "Delete existing related item $rid")) { continue }
             try {
                 $delUri = $deleteUriTemplate -f $rid
                 Invoke-RestMethod -Uri $delUri -Method DELETE -Headers $authHeader -UseBasicParsing -ErrorAction Stop | Out-Null
@@ -199,6 +185,7 @@ foreach ($item in $fileToDeviceId) {
         }
     }
 
+    if (-not $PSCmdlet.ShouldProcess("Device $deviceId", "Upload QR attachment $($fileInfo.Name)")) { continue }
     try {
         $boundary = [System.Guid]::NewGuid().ToString()
         $fileBytes = [System.IO.File]::ReadAllBytes($filePath)

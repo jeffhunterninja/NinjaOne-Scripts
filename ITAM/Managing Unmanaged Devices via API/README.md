@@ -8,7 +8,7 @@ Bulk-create NinjaOne ITAM unmanaged devices from a CSV file. Use this workflow a
 - **NinjaOne API application** (e.g. Machine-to-Machine) with:
   - **Grant type:** Client credentials
   - **Scopes:** `monitoring` and `management`
-- **Unmanaged device roles** already created in NinjaOne for each equipment type you import. Role names in the CSV must match exactly (case-sensitive). Common examples:
+- **Unmanaged device roles** already created in NinjaOne for each equipment type you import. Role names in the CSV are matched case-insensitively by script logic. Common examples:
   - Mouse, Keyboard, Displays (or Monitor), Headset, Dock
   - Create or rename roles in NinjaOne under the relevant ITAM / device role configuration so the names match your CSV.
 - **Base URL** for your NinjaOne instance, e.g.:
@@ -27,7 +27,7 @@ Use **either** of these sets:
 - **By name:** `Name`, `RoleName`, `OrganizationName`, `LocationName`
 - **By ID:** `Name`, `RoleName`, `OrganizationId`, `LocationId`
 
-- **Name** – Display name for the unmanaged device (e.g. "Logitech MX Master 3", "Dell P2422H"). If empty, the script may derive a name from Make + Model or generate one.
+- **Name** – Column is required, but value may be blank. If blank, the script derives a display name from Make + Model or generates one.
 - **RoleName** – Must match an existing unmanaged device role in NinjaOne (e.g. Mouse, Keyboard, Displays, Headset, Dock). Note: NinjaOne may use "Displays" instead of "Monitor"; check your instance.
 
 ### Optional columns
@@ -56,10 +56,10 @@ $env:NinjaOneClientSecret = "your-client-secret"
 .\Import-NinjaUnmanagedDevicesFromCsv.ps1 -CsvPath ".\equipment.csv" -BaseUrl app.ninjarmm.com
 ```
 
-### Preview only (no devices created)
+### Create required unmanaged roles first (optional helper script)
 
 ```powershell
-.\Import-NinjaUnmanagedDevicesFromCsv.ps1 -CsvPath ".\equipment.csv" -BaseUrl ca.ninjarmm.com -WhatIf
+.\Create-NinjaNodeRoles.ps1 -CsvPath ".\NodeRoles-Example.csv" -BaseUrl ca.ninjarmm.com
 ```
 
 ### Continue on errors and report at the end
@@ -86,5 +86,6 @@ See **Import-UnmanagedDevices-Example.csv** in this folder for sample rows (Mous
 ## Script behavior
 
 - The script is **standalone** (no dot-sourcing); all API and OAuth logic is inlined.
-- It obtains an OAuth token, caches organizations, locations, and unmanaged device roles, then processes each CSV row: resolves role/org/location, creates the device via `v2/itam/unmanaged-device`, and optionally PATCHes custom fields.
+- It obtains an OAuth token, caches organizations, locations, and unmanaged device roles with paged API reads, then processes each CSV row: resolves role/org/location, creates the device via `v2/itam/unmanaged-device`, and optionally PATCHes custom fields.
+- API calls include retry/backoff for transient failures (for example, 429/5xx), and refresh the token automatically when needed.
 - Output: summary of created and failed counts; with `-SkipErrors`, all row errors are listed at the end.

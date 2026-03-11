@@ -21,11 +21,22 @@
 .PARAMETER NinjaOneInstance
     NinjaOne instance hostname or base URL.
     Default: env:NINJA_BASE_URL or ca.ninjarmm.com.
+    For branded or partner portals, use the branded host here (for example,
+    rcs-sales.rmmservice.ca or https://rcs-sales.rmmservice.ca) so that the
+    entire OAuth flow (authorize, consent, and redirect back to localhost)
+    stays on the same host. If the browser is redirected to a regional host
+    such as https://ca.ninjarmm.com/ws/oauth/consent and shows
+    "Missing or empty sessionKey.", the redirect behavior is coming from the
+    NinjaOne web app; this script always uses the instance you provide for
+    /ws/oauth/authorize and /ws/oauth/token.
 
 .PARAMETER ClientId
     OAuth application Client ID (Native / Authorization Code type).
     Default: env:NinjaOneClientId. If neither the parameter nor the env var is set,
     the user is prompted in the UI before sign-in.
+
+.PARAMETER AllowInsecureHttp
+    Allow http:// base URLs for development/testing only. By default, HTTPS is required.
 
 .EXAMPLE
     .\Invoke-NinjaITAMManager.ps1
@@ -37,7 +48,8 @@
 [CmdletBinding()]
 param(
     [string] $NinjaOneInstance = $(if ($env:NINJA_BASE_URL) { $env:NINJA_BASE_URL } else { 'ca.ninjarmm.com' }),
-    [string] $ClientId = $env:NinjaOneClientId
+    [string] $ClientId = $env:NinjaOneClientId,
+    [switch] $AllowInsecureHttp
 )
 
 $ErrorActionPreference = 'Stop'
@@ -61,6 +73,7 @@ $script:AuthVerifier     = $null
 $script:AuthState        = $null
 $script:AuthRedirectUri  = $null
 $script:AuthListener     = $null
+$script:AuthTimeoutAt    = [datetime]::MinValue
 
 $script:OrgCache         = $null
 $script:LocationCache    = $null
@@ -74,15 +87,346 @@ $script:UploadFileMap    = [System.Collections.Generic.List[PSCustomObject]]::ne
 
 $script:ScanUserInfo     = $null
 $script:ScanDevices      = [System.Collections.Generic.List[PSCustomObject]]::new()
+$script:AllowInsecureHttp = $AllowInsecureHttp.IsPresent
+
+$script:MasterPassword   = $null
+$script:MasterPasswordVerifier = $null
+$script:ITAMConfigDir    = Join-Path $env:APPDATA 'NinjaITAMManager'
+$script:ITAMConfigFile   = Join-Path $script:ITAMConfigDir 'config.json'
+#endregion
+
+#region Cryptography (AES-256-CBC + PBKDF2)
+function Protect-String {
+    param([string]$PlainText, [string]$MasterPwd)
+    $salt = [byte[]]::new(32)
+    $iv   = [byte[]]::new(16)
+    $rng  = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    $rng.GetBytes($salt); $rng.GetBytes($iv); $rng.Dispose()
+
+    $kdf = [System.Security.Cryptography.Rfc2898DeriveBytes]::new(
+        $MasterPwd, $salt, 100000, [System.Security.Cryptography.HashAlgorithmName]::SHA256)
+    $key = $kdf.GetBytes(32); $kdf.Dispose()
+
+    $aes = [System.Security.Cryptography.Aes]::Create()
+    $aes.Key = $key; $aes.IV = $iv
+    $aes.Mode    = [System.Security.Cryptography.CipherMode]::CBC
+    $aes.Padding = [System.Security.Cryptography.PaddingMode]::PKCS7
+    $enc   = $aes.CreateEncryptor()
+    $plain = [System.Text.Encoding]::UTF8.GetBytes($PlainText)
+    $cipher = $enc.TransformFinalBlock($plain, 0, $plain.Length)
+    $enc.Dispose(); $aes.Dispose()
+
+    $combined = [byte[]]::new(32 + 16 + $cipher.Length)
+    [Array]::Copy($salt,   0, $combined, 0,  32)
+    [Array]::Copy($iv,     0, $combined, 32, 16)
+    [Array]::Copy($cipher, 0, $combined, 48, $cipher.Length)
+
+    [Array]::Clear($key,   0, $key.Length)
+    [Array]::Clear($plain, 0, $plain.Length)
+    return [Convert]::ToBase64String($combined)
+}
+
+function Unprotect-String {
+    param([string]$CipherText, [string]$MasterPwd)
+    $combined = [Convert]::FromBase64String($CipherText)
+
+    $salt   = [byte[]]::new(32)
+    $iv     = [byte[]]::new(16)
+    $cipher = [byte[]]::new($combined.Length - 48)
+    [Array]::Copy($combined, 0,  $salt,   0, 32)
+    [Array]::Copy($combined, 32, $iv,     0, 16)
+    [Array]::Copy($combined, 48, $cipher, 0, $cipher.Length)
+
+    $kdf = [System.Security.Cryptography.Rfc2898DeriveBytes]::new(
+        $MasterPwd, $salt, 100000, [System.Security.Cryptography.HashAlgorithmName]::SHA256)
+    $key = $kdf.GetBytes(32); $kdf.Dispose()
+
+    $aes = [System.Security.Cryptography.Aes]::Create()
+    $aes.Key = $key; $aes.IV = $iv
+    $aes.Mode    = [System.Security.Cryptography.CipherMode]::CBC
+    $aes.Padding = [System.Security.Cryptography.PaddingMode]::PKCS7
+    $dec   = $aes.CreateDecryptor()
+    $plain = $dec.TransformFinalBlock($cipher, 0, $cipher.Length)
+    $dec.Dispose(); $aes.Dispose()
+
+    $result = [System.Text.Encoding]::UTF8.GetString($plain)
+    [Array]::Clear($key,   0, $key.Length)
+    [Array]::Clear($plain, 0, $plain.Length)
+    return $result
+}
+
+function New-MasterPasswordVerifier {
+    param([string]$MasterPwd)
+    $salt = [byte[]]::new(32)
+    $rng  = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    $rng.GetBytes($salt); $rng.Dispose()
+    $kdf = [System.Security.Cryptography.Rfc2898DeriveBytes]::new(
+        $MasterPwd, $salt, 100000, [System.Security.Cryptography.HashAlgorithmName]::SHA256)
+    $hash = $kdf.GetBytes(32); $kdf.Dispose()
+    $combined = [byte[]]::new(64)
+    [Array]::Copy($salt, 0, $combined, 0,  32)
+    [Array]::Copy($hash, 0, $combined, 32, 32)
+    [Array]::Clear($hash, 0, $hash.Length)
+    return [Convert]::ToBase64String($combined)
+}
+
+function Test-MasterPasswordValid {
+    param([string]$MasterPwd, [string]$Verifier)
+    $combined   = [Convert]::FromBase64String($Verifier)
+    $salt       = [byte[]]::new(32)
+    $storedHash = [byte[]]::new(32)
+    [Array]::Copy($combined, 0,  $salt,       0, 32)
+    [Array]::Copy($combined, 32, $storedHash, 0, 32)
+    $kdf = [System.Security.Cryptography.Rfc2898DeriveBytes]::new(
+        $MasterPwd, $salt, 100000, [System.Security.Cryptography.HashAlgorithmName]::SHA256)
+    $computed = $kdf.GetBytes(32); $kdf.Dispose()
+    $diff = 0
+    for ($i = 0; $i -lt 32; $i++) { $diff = $diff -bor ($storedHash[$i] -bxor $computed[$i]) }
+    [Array]::Clear($computed, 0, $computed.Length)
+    return ($diff -eq 0)
+}
+#endregion
+
+#region Config File Management
+function Get-ITAMConfig {
+    $defaults = [PSCustomObject]@{
+        NinjaInstance          = ''
+        ClientId               = ''
+        EncryptedRefreshToken  = ''
+        MasterPasswordVerifier = ''
+    }
+    if (Test-Path $script:ITAMConfigFile) {
+        try {
+            $raw = Get-Content $script:ITAMConfigFile -Raw | ConvertFrom-Json
+            foreach ($prop in $raw.PSObject.Properties) {
+                if ($defaults.PSObject.Properties[$prop.Name]) {
+                    $defaults.$($prop.Name) = $prop.Value
+                }
+            }
+        } catch {
+            Write-Verbose "Failed to load ITAM config: $($_.Exception.Message)"
+        }
+    }
+    return $defaults
+}
+
+function Save-ITAMConfig {
+    param(
+        [string]$Instance,
+        [string]$ClientIdValue,
+        [string]$EncryptedRefreshToken,
+        [string]$Verifier
+    )
+    if (-not (Test-Path $script:ITAMConfigDir)) {
+        New-Item -ItemType Directory -Path $script:ITAMConfigDir -Force | Out-Null
+    }
+    $disk = [ordered]@{
+        NinjaInstance          = $Instance
+        ClientId               = $ClientIdValue
+        EncryptedRefreshToken  = $EncryptedRefreshToken
+        MasterPasswordVerifier = $Verifier
+    }
+    [PSCustomObject]$disk | ConvertTo-Json -Depth 5 |
+        Set-Content $script:ITAMConfigFile -Encoding UTF8
+}
+
+function Save-CurrentSession {
+    if (-not $script:MasterPassword) { return }
+    if (-not (Test-RefreshTokenPresent)) { return }
+    $plainRefresh = ConvertFrom-SecureToken $script:RefreshToken
+    $encrypted = Protect-String -PlainText $plainRefresh -MasterPwd $script:MasterPassword
+    $verifier  = if ($script:MasterPasswordVerifier) {
+        $script:MasterPasswordVerifier
+    } else {
+        $v = New-MasterPasswordVerifier -MasterPwd $script:MasterPassword
+        $script:MasterPasswordVerifier = $v
+        $v
+    }
+    Save-ITAMConfig -Instance $script:NinjaBaseUrl `
+                    -ClientIdValue $script:NinjaClientId `
+                    -EncryptedRefreshToken $encrypted `
+                    -Verifier $verifier
+}
+
+function Clear-SavedSession {
+    if (Test-Path $script:ITAMConfigFile) {
+        Remove-Item $script:ITAMConfigFile -Force -ErrorAction SilentlyContinue
+    }
+    $script:MasterPassword = $null
+    $script:MasterPasswordVerifier = $null
+}
+#endregion
+
+#region Master Password Dialogs
+function Show-MasterPasswordPrompt {
+    param(
+        [string]$Title = 'Master Password',
+        [string]$Message = 'Enter your master password:',
+        [switch]$IsNewPassword
+    )
+    $dlgXaml = @"
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="$Title" SizeToContent="WidthAndHeight" ResizeMode="NoResize"
+        WindowStartupLocation="CenterOwner" MinWidth="380" MaxWidth="440"
+        Background="#FAFAFA">
+  <StackPanel Margin="20">
+    <TextBlock Text="$Message" TextWrapping="Wrap" Margin="0,0,0,12" FontSize="13"/>
+    <TextBlock Text="Password" FontSize="11" Foreground="#555" Margin="0,0,0,4"/>
+    <PasswordBox x:Name="pbPassword" Height="28" Margin="0,0,0,4"/>
+    $(if ($IsNewPassword) {
+    '<TextBlock Text="Confirm Password" FontSize="11" Foreground="#555" Margin="0,8,0,4"/>' +
+    '<PasswordBox x:Name="pbConfirm" Height="28" Margin="0,0,0,4"/>' +
+    '<TextBlock FontSize="11" Foreground="#888" Margin="0,2,0,0" Text="Minimum 8 characters. This password encrypts your saved session."/>'
+    } else { '' })
+    <TextBlock x:Name="lblError" Foreground="Red" FontSize="11" Margin="0,6,0,0"
+               TextWrapping="Wrap" Visibility="Collapsed"/>
+    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0">
+      <Button x:Name="btnOK" Content="OK" Width="80" IsDefault="True" Margin="0,0,8,0"/>
+      <Button x:Name="btnCancel" Content="Cancel" Width="80" IsCancel="True"/>
+    </StackPanel>
+  </StackPanel>
+</Window>
+"@
+    $dlgReader = New-Object System.Xml.XmlNodeReader ([xml]$dlgXaml)
+    $dlg = [Windows.Markup.XamlReader]::Load($dlgReader)
+    $dlg.Owner = $window
+
+    $pbPwd      = $dlg.FindName('pbPassword')
+    $pbConfirm  = if ($IsNewPassword) { $dlg.FindName('pbConfirm') } else { $null }
+    $lblErr     = $dlg.FindName('lblError')
+    $btnDlgOK   = $dlg.FindName('btnOK')
+    $btnDlgCanc = $dlg.FindName('btnCancel')
+
+    $btnDlgOK.Add_Click({
+        $enteredPwd = $pbPwd.Password
+        if ([string]::IsNullOrWhiteSpace($enteredPwd)) {
+            $lblErr.Text = 'Password cannot be empty.'
+            $lblErr.Visibility = 'Visible'
+            return
+        }
+        if ($IsNewPassword) {
+            if ($enteredPwd.Length -lt 8) {
+                $lblErr.Text = 'Password must be at least 8 characters.'
+                $lblErr.Visibility = 'Visible'
+                return
+            }
+            if ($enteredPwd -ne $pbConfirm.Password) {
+                $lblErr.Text = 'Passwords do not match.'
+                $lblErr.Visibility = 'Visible'
+                return
+            }
+        }
+        $dlg.Tag = $enteredPwd
+        $dlg.DialogResult = $true
+        $dlg.Close()
+    }.GetNewClosure())
+
+    $btnDlgCanc.Add_Click({
+        $dlg.DialogResult = $false
+        $dlg.Close()
+    }.GetNewClosure())
+
+    $dlg.Add_ContentRendered({ $pbPwd.Focus() }.GetNewClosure())
+
+    $ok = $dlg.ShowDialog()
+    if ($ok) { return $dlg.Tag } else { return $null }
+}
+
+function Show-ChangeMasterPasswordPrompt {
+    $dlgXaml = @"
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Change Master Password" SizeToContent="WidthAndHeight" ResizeMode="NoResize"
+        WindowStartupLocation="CenterOwner" MinWidth="380" MaxWidth="440"
+        Background="#FAFAFA">
+  <StackPanel Margin="20">
+    <TextBlock Text="Enter your current password, then choose a new one."
+               TextWrapping="Wrap" Margin="0,0,0,12" FontSize="13"/>
+    <TextBlock Text="Current Password" FontSize="11" Foreground="#555" Margin="0,0,0,4"/>
+    <PasswordBox x:Name="pbCurrent" Height="28" Margin="0,0,0,8"/>
+    <TextBlock Text="New Password" FontSize="11" Foreground="#555" Margin="0,0,0,4"/>
+    <PasswordBox x:Name="pbNew" Height="28" Margin="0,0,0,4"/>
+    <TextBlock Text="Confirm New Password" FontSize="11" Foreground="#555" Margin="0,8,0,4"/>
+    <PasswordBox x:Name="pbConfirmNew" Height="28" Margin="0,0,0,4"/>
+    <TextBlock FontSize="11" Foreground="#888" Margin="0,2,0,0"
+               Text="Minimum 8 characters."/>
+    <TextBlock x:Name="lblError" Foreground="Red" FontSize="11" Margin="0,6,0,0"
+               TextWrapping="Wrap" Visibility="Collapsed"/>
+    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0">
+      <Button x:Name="btnOK" Content="Change" Width="80" IsDefault="True" Margin="0,0,8,0"/>
+      <Button x:Name="btnCancel" Content="Cancel" Width="80" IsCancel="True"/>
+    </StackPanel>
+  </StackPanel>
+</Window>
+"@
+    $dlgReader = New-Object System.Xml.XmlNodeReader ([xml]$dlgXaml)
+    $dlg = [Windows.Markup.XamlReader]::Load($dlgReader)
+    $dlg.Owner = $window
+
+    $pbCur      = $dlg.FindName('pbCurrent')
+    $pbNew      = $dlg.FindName('pbNew')
+    $pbConf     = $dlg.FindName('pbConfirmNew')
+    $lblErr     = $dlg.FindName('lblError')
+    $btnDlgOK   = $dlg.FindName('btnOK')
+    $btnDlgCanc = $dlg.FindName('btnCancel')
+
+    $btnDlgOK.Add_Click({
+        $cur = $pbCur.Password
+        if (-not $script:MasterPasswordVerifier -or
+            -not (Test-MasterPasswordValid -MasterPwd $cur -Verifier $script:MasterPasswordVerifier)) {
+            $lblErr.Text = 'Current password is incorrect.'
+            $lblErr.Visibility = 'Visible'
+            return
+        }
+        $npwd = $pbNew.Password
+        if ($npwd.Length -lt 8) {
+            $lblErr.Text = 'New password must be at least 8 characters.'
+            $lblErr.Visibility = 'Visible'
+            return
+        }
+        if ($npwd -ne $pbConf.Password) {
+            $lblErr.Text = 'New passwords do not match.'
+            $lblErr.Visibility = 'Visible'
+            return
+        }
+        $dlg.Tag = $npwd
+        $dlg.DialogResult = $true
+        $dlg.Close()
+    }.GetNewClosure())
+
+    $btnDlgCanc.Add_Click({
+        $dlg.DialogResult = $false
+        $dlg.Close()
+    }.GetNewClosure())
+
+    $dlg.Add_ContentRendered({ $pbCur.Focus() }.GetNewClosure())
+
+    $ok = $dlg.ShowDialog()
+    if ($ok) { return $dlg.Tag } else { return $null }
+}
 #endregion
 
 #region Helper Functions
 function Resolve-BaseUrl {
     param([string]$Instance)
-    $u = $Instance.Trim()
+    $u = if ($null -eq $Instance) { '' } else { $Instance.Trim() }
     if ([string]::IsNullOrWhiteSpace($u)) { $u = 'https://app.ninjarmm.com' }
-    if ($u -notmatch '^https?://') { $u = "https://$u" }
-    return $u.TrimEnd('/')
+    if ($u -notmatch '^[a-zA-Z][a-zA-Z0-9+\-.]*://') { $u = "https://$u" }
+
+    $uri = $null
+    if (-not [System.Uri]::TryCreate($u, [System.UriKind]::Absolute, [ref]$uri)) {
+        throw "Invalid NinjaOne instance URL: '$Instance'."
+    }
+
+    if ($uri.Scheme -eq 'http' -and -not $script:AllowInsecureHttp) {
+        throw "Insecure HTTP is not allowed. Use an HTTPS NinjaOne URL, or run with -AllowInsecureHttp for local testing only."
+    }
+    if ($uri.Scheme -ne 'https' -and $uri.Scheme -ne 'http') {
+        throw "Unsupported URL scheme '$($uri.Scheme)'. Use https:// (or http:// with -AllowInsecureHttp)."
+    }
+
+    return $uri.AbsoluteUri.TrimEnd('/')
 }
 
 function New-PkceVerifier {
@@ -128,12 +472,19 @@ function Update-TokensFromResponse {
     }
     $script:AccessToken = ConvertTo-SecureToken $accessProp.Value
 
+    $refreshRotated = $false
     $refreshProp = $Response.PSObject.Properties['refresh_token']
     if ($null -ne $refreshProp -and -not [string]::IsNullOrWhiteSpace($refreshProp.Value)) {
         $script:RefreshToken = ConvertTo-SecureToken $refreshProp.Value
+        $refreshRotated = $true
     }
     $exp = if ($Response.expires_in) { [int]$Response.expires_in } else { 3600 }
+    if ($exp -le 0) { $exp = 3600 }
     $script:TokenExpiresAt = [datetime]::UtcNow.AddSeconds($exp - 60)
+
+    if ($refreshRotated -and $script:MasterPassword) {
+        try { Save-CurrentSession } catch { Write-Verbose "Auto-save after token rotation failed: $($_.Exception.Message)" }
+    }
 }
 
 function Invoke-TokenRefresh {
@@ -161,27 +512,56 @@ function Invoke-NinjaApi {
         [object]$Body
     )
     if (-not (Test-TokenValid)) { Invoke-TokenRefresh }
-    $uri = "$($script:NinjaBaseUrl)/ws/api/v2/$($Endpoint.TrimStart('/'))"
-    $p = @{
-        Uri             = $uri
-        Method          = $Method
-        UseBasicParsing = $true
-        ErrorAction     = 'Stop'
-        Headers         = @{
-            'Authorization' = "Bearer $(ConvertFrom-SecureToken $script:AccessToken)"
-            'Accept'        = 'application/json'
+    for ($attempt = 1; $attempt -le 2; $attempt++) {
+        $uri = "$($script:NinjaBaseUrl)/api/v2/$($Endpoint.TrimStart('/'))"
+        $p = @{
+            Uri             = $uri
+            Method          = $Method
+            UseBasicParsing = $true
+            ErrorAction     = 'Stop'
+            Headers         = @{
+                'Authorization' = "Bearer $(ConvertFrom-SecureToken $script:AccessToken)"
+                'Accept'        = 'application/json'
+            }
+        }
+        if ($Method -ne 'GET') {
+            if ($Body) {
+                $p.ContentType = 'application/json'
+                $p.Body = ($Body | ConvertTo-Json -Depth 10)
+            } else {
+                $p.ContentType = 'application/json'
+                $p.Body = '{}'
+            }
+        }
+        try {
+            return Invoke-RestMethod @p
+        } catch {
+            $statusCode = 0
+            if ($_.Exception.Response) {
+                $statusCode = [int]$_.Exception.Response.StatusCode
+            }
+            if ($attempt -eq 1 -and $statusCode -eq 401 -and (Test-RefreshTokenPresent)) {
+                $script:TokenExpiresAt = [datetime]::MinValue
+                Invoke-TokenRefresh
+                continue
+            }
+            throw
         }
     }
-    if ($Method -ne 'GET') {
-        if ($Body) {
-            $p.ContentType = 'application/json'
-            $p.Body = ($Body | ConvertTo-Json -Depth 10)
-        } else {
-            $p.ContentType = 'application/json'
-            $p.Body = '{}'
-        }
+}
+
+function Get-ValidBearerToken {
+    if (-not (Test-TokenValid)) { Invoke-TokenRefresh }
+    $plain = $null
+    if ($script:AccessToken) { $plain = ConvertFrom-SecureToken $script:AccessToken }
+    if ([string]::IsNullOrWhiteSpace($plain) -and (Test-RefreshTokenPresent)) {
+        Invoke-TokenRefresh
+        $plain = ConvertFrom-SecureToken $script:AccessToken
     }
-    return Invoke-RestMethod @p
+    if ([string]::IsNullOrWhiteSpace($plain)) {
+        throw "Not authenticated. Please sign in again."
+    }
+    return $plain
 }
 
 function ConvertTo-ListItems {
@@ -265,7 +645,16 @@ function Find-UserById {
     param([int]$UserId)
     try {
         $allUsers = @(Invoke-NinjaApi -Endpoint 'users')
-        $m = $allUsers | Where-Object { $_.id -eq $UserId } | Select-Object -First 1
+        $matches = $allUsers | Where-Object { $_.id -eq $UserId }
+        $m = $null
+        if ($matches) {
+            $m = $matches | Where-Object {
+                $_.PSObject.Properties['userType'] -and $_.userType -eq 'END_USER'
+            } | Select-Object -First 1
+            if (-not $m) {
+                $m = $matches | Select-Object -First 1
+            }
+        }
         if ($m) {
             $userType = if ($m.PSObject.Properties['userType']) { $m.userType } else { $null }
             if ($userType -eq 'END_USER') {
@@ -581,6 +970,15 @@ $xaml = @"
             <TextBlock x:Name="lblAuthStatus" VerticalAlignment="Center"
                        Margin="12,0,0,0" FontWeight="SemiBold"
                        Text="Not connected" Foreground="Gray"/>
+          </StackPanel>
+          <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+            <Button x:Name="btnChangeMasterPwd" Content="Change Master Password"
+                    Width="170" Visibility="Collapsed"/>
+            <Button x:Name="btnClearSession" Content="Clear Saved Session"
+                    Margin="8,0,0,0" Width="140" Visibility="Collapsed"/>
+            <TextBlock x:Name="lblSessionHint" VerticalAlignment="Center"
+                       Margin="12,0,0,0" FontSize="11" Foreground="#888"
+                       Text="" TextWrapping="Wrap"/>
           </StackPanel>
         </StackPanel>
       </Border>
@@ -904,6 +1302,9 @@ $tbInstance          = $window.FindName('tbInstance')
 $tbClientId          = $window.FindName('tbClientId')
 $btnSignIn           = $window.FindName('btnSignIn')
 $lblAuthStatus       = $window.FindName('lblAuthStatus')
+$btnChangeMasterPwd  = $window.FindName('btnChangeMasterPwd')
+$btnClearSession     = $window.FindName('btnClearSession')
+$lblSessionHint      = $window.FindName('lblSessionHint')
 $tabControl          = $window.FindName('tabControl')
 $lblStatus           = $window.FindName('lblStatus')
 
@@ -969,11 +1370,31 @@ $btnScanReset        = $window.FindName('btnScanReset')
 #endregion
 
 #region Initialize Defaults
-$tbInstance.Text = $NinjaOneInstance
-$tbClientId.Text = if ($ClientId) { $ClientId } else { '' }
-$hasDefaults = -not [string]::IsNullOrWhiteSpace($ClientId) -and `
-               -not [string]::IsNullOrWhiteSpace($NinjaOneInstance)
-$expSettings.IsExpanded = -not $hasDefaults
+$script:ITAMConfig = Get-ITAMConfig
+$hasSavedSession = -not [string]::IsNullOrWhiteSpace($script:ITAMConfig.EncryptedRefreshToken) -and
+                   -not [string]::IsNullOrWhiteSpace($script:ITAMConfig.MasterPasswordVerifier)
+
+if ($hasSavedSession) {
+    $tbInstance.Text = if (-not [string]::IsNullOrWhiteSpace($script:ITAMConfig.NinjaInstance)) {
+        $inst = $script:ITAMConfig.NinjaInstance -replace '^https?://', ''
+        $inst.TrimEnd('/')
+    } elseif ($NinjaOneInstance) { $NinjaOneInstance } else { '' }
+    $tbClientId.Text = if (-not [string]::IsNullOrWhiteSpace($script:ITAMConfig.ClientId)) {
+        $script:ITAMConfig.ClientId
+    } elseif ($ClientId) { $ClientId } else { '' }
+    $lblSessionHint.Text = 'Saved session found. Click Sign In to reconnect.'
+    $btnClearSession.Visibility = 'Visible'
+    $expSettings.IsExpanded = $true
+} else {
+    $tbInstance.Text = $NinjaOneInstance
+    $tbClientId.Text = if ($ClientId) { $ClientId } else { '' }
+}
+
+$hasDefaults = -not [string]::IsNullOrWhiteSpace($tbClientId.Text) -and `
+               -not [string]::IsNullOrWhiteSpace($tbInstance.Text)
+if (-not $hasSavedSession) {
+    $expSettings.IsExpanded = -not $hasDefaults
+}
 
 $tbQrOutputDir.Text = '.\DeviceQRCodes'
 foreach ($size in @(100, 150, 200, 250, 300, 400, 500, 600)) {
@@ -1026,7 +1447,14 @@ function Reset-ScanAll {
 
 #region Sign-In (Authorization Code + PKCE)
 $btnSignIn.Add_Click({
-    $script:NinjaBaseUrl  = Resolve-BaseUrl -Instance $tbInstance.Text
+    try {
+        $script:NinjaBaseUrl = Resolve-BaseUrl -Instance $tbInstance.Text
+    } catch {
+        [System.Windows.MessageBox]::Show(
+            $_.Exception.Message,
+            'Invalid Instance URL', 'OK', 'Warning') | Out-Null
+        return
+    }
     $script:NinjaClientId = $tbClientId.Text.Trim()
 
     if ([string]::IsNullOrWhiteSpace($script:NinjaClientId)) {
@@ -1034,6 +1462,74 @@ $btnSignIn.Add_Click({
             'Client ID is required. Enter the Client ID from your NinjaOne OAuth application.',
             'Missing Client ID', 'OK', 'Warning') | Out-Null
         return
+    }
+
+    $cfg = Get-ITAMConfig
+    $hasSaved = -not [string]::IsNullOrWhiteSpace($cfg.EncryptedRefreshToken) -and
+                -not [string]::IsNullOrWhiteSpace($cfg.MasterPasswordVerifier)
+    if ($hasSaved) {
+        $btnSignIn.IsEnabled = $false
+        $lblAuthStatus.Text = 'Unlocking saved session...'
+        $lblAuthStatus.Foreground = [System.Windows.Media.Brushes]::DarkOrange
+        $lblStatus.Text = 'Enter your master password to reconnect using saved session.'
+        Push-UIUpdate
+
+        $masterPwd = Show-MasterPasswordPrompt -Title 'Unlock Saved Session' `
+                        -Message 'Enter your master password to reconnect:'
+        if ($null -eq $masterPwd) {
+            $lblAuthStatus.Text = 'Not connected'
+            $lblAuthStatus.Foreground = [System.Windows.Media.Brushes]::Gray
+            $lblStatus.Text = 'Master password entry cancelled. Click Sign In to try again, or use browser sign-in.'
+            $btnSignIn.IsEnabled = $true
+            return
+        }
+
+        if (-not (Test-MasterPasswordValid -MasterPwd $masterPwd -Verifier $cfg.MasterPasswordVerifier)) {
+            [System.Windows.MessageBox]::Show(
+                'Incorrect master password. You can try again or clear the saved session to sign in via browser.',
+                'Wrong Password', 'OK', 'Warning') | Out-Null
+            $lblAuthStatus.Text = 'Not connected'
+            $lblAuthStatus.Foreground = [System.Windows.Media.Brushes]::Gray
+            $lblStatus.Text = 'Master password incorrect. Click Sign In to retry.'
+            $btnSignIn.IsEnabled = $true
+            return
+        }
+
+        try {
+            $plainRefresh = Unprotect-String -CipherText $cfg.EncryptedRefreshToken -MasterPwd $masterPwd
+            $script:RefreshToken = ConvertTo-SecureToken $plainRefresh
+            $script:MasterPassword = $masterPwd
+            $script:MasterPasswordVerifier = $cfg.MasterPasswordVerifier
+
+            $lblAuthStatus.Text = 'Refreshing token...'
+            Push-UIUpdate
+
+            Invoke-TokenRefresh
+
+            $lblAuthStatus.Text = 'Connected'
+            $lblAuthStatus.Foreground = [System.Windows.Media.Brushes]::Green
+            $expSettings.IsExpanded = $false
+            $lblStatus.Text = 'Reconnected using saved session. Use any tab to begin.'
+            $lblSessionHint.Text = ''
+            $btnChangeMasterPwd.Visibility = 'Visible'
+            $btnClearSession.Visibility = 'Visible'
+
+            Save-CurrentSession
+
+            $script:OrgCache      = $null
+            $script:LocationCache = $null
+            $script:RoleCache     = $null
+            $btnSignIn.IsEnabled = $true
+            return
+        } catch {
+            $script:RefreshToken = $null
+            $script:MasterPassword = $masterPwd
+            $script:MasterPasswordVerifier = $cfg.MasterPasswordVerifier
+            $lblAuthStatus.Text = 'Session expired'
+            $lblAuthStatus.Foreground = [System.Windows.Media.Brushes]::DarkOrange
+            $lblStatus.Text = "Saved session expired or revoked. Falling back to browser sign-in..."
+            Push-UIUpdate
+        }
     }
 
     $btnSignIn.IsEnabled = $false
@@ -1045,6 +1541,7 @@ $btnSignIn.Add_Click({
     $script:AuthVerifier = New-PkceVerifier
     $script:AuthState = New-OAuthState
     $challenge = Get-PkceChallenge -Verifier $script:AuthVerifier
+    $script:AuthTimeoutAt = [datetime]::UtcNow.AddMinutes(3)
 
     $script:AuthRedirectUri = "http://localhost:8888/"
 
@@ -1101,7 +1598,25 @@ $btnSignIn.Add_Click({
     $timer = [System.Windows.Threading.DispatcherTimer]::new()
     $timer.Interval = [TimeSpan]::FromMilliseconds(500)
     $timer.Add_Tick({
-        if (-not $script:AuthHandle.IsCompleted) { return }
+        if (-not $script:AuthHandle.IsCompleted) {
+            if ($script:AuthTimeoutAt -ne [datetime]::MinValue -and
+                [datetime]::UtcNow -lt $script:AuthTimeoutAt) {
+                return
+            }
+            try { $script:AuthListener.Stop() } catch { }
+            try { $script:AuthListener.Close() } catch { }
+            try { if ($script:AuthPS) { $script:AuthPS.Stop() } } catch { }
+            try { if ($script:AuthPS) { $script:AuthPS.Dispose() } } catch { }
+            $script:AuthPS = $null
+            $script:AuthHandle = $null
+            $lblAuthStatus.Text = 'Timed out'
+            $lblAuthStatus.Foreground = [System.Windows.Media.Brushes]::Red
+            $lblStatus.Text = 'Sign-in timed out waiting for OAuth callback. Click Sign In to try again.'
+            $btnSignIn.IsEnabled = $true
+            $script:AuthState = $null
+            $this.Stop()
+            return
+        }
         $this.Stop()
 
         try {
@@ -1143,7 +1658,29 @@ $btnSignIn.Add_Click({
                 $lblAuthStatus.Text = 'Connected'
                 $lblAuthStatus.Foreground = [System.Windows.Media.Brushes]::Green
                 $expSettings.IsExpanded = $false
-                $lblStatus.Text = 'Signed in successfully. Use any tab to begin.'
+
+                if (-not $script:MasterPassword) {
+                    $newPwd = Show-MasterPasswordPrompt -Title 'Save Session' `
+                                  -Message 'Set a master password to save your session across app restarts.' `
+                                  -IsNewPassword
+                    if ($newPwd) {
+                        $script:MasterPassword = $newPwd
+                        $script:MasterPasswordVerifier = New-MasterPasswordVerifier -MasterPwd $newPwd
+                        Save-CurrentSession
+                        $btnChangeMasterPwd.Visibility = 'Visible'
+                        $btnClearSession.Visibility = 'Visible'
+                        $lblSessionHint.Text = ''
+                        $lblStatus.Text = 'Signed in successfully. Session saved.'
+                    } else {
+                        $lblStatus.Text = 'Signed in successfully. Session not saved (no master password set).'
+                    }
+                } else {
+                    Save-CurrentSession
+                    $btnChangeMasterPwd.Visibility = 'Visible'
+                    $btnClearSession.Visibility = 'Visible'
+                    $lblSessionHint.Text = ''
+                    $lblStatus.Text = 'Signed in successfully. Session saved.'
+                }
 
                 $script:OrgCache      = $null
                 $script:LocationCache = $null
@@ -1174,6 +1711,27 @@ $btnSignIn.Add_Click({
         $btnSignIn.IsEnabled = $true
     })
     $timer.Start()
+})
+
+$btnChangeMasterPwd.Add_Click({
+    $newPwd = Show-ChangeMasterPasswordPrompt
+    if ($null -eq $newPwd) { return }
+    $script:MasterPassword = $newPwd
+    $script:MasterPasswordVerifier = New-MasterPasswordVerifier -MasterPwd $newPwd
+    Save-CurrentSession
+    $lblStatus.Text = 'Master password changed and session re-encrypted.'
+})
+
+$btnClearSession.Add_Click({
+    $confirm = [System.Windows.MessageBox]::Show(
+        'This will delete your saved session. You will need to sign in via browser on next launch. Continue?',
+        'Clear Saved Session', 'YesNo', 'Question')
+    if ($confirm -ne 'Yes') { return }
+    Clear-SavedSession
+    $btnChangeMasterPwd.Visibility = 'Collapsed'
+    $btnClearSession.Visibility = 'Collapsed'
+    $lblSessionHint.Text = ''
+    $lblStatus.Text = 'Saved session cleared.'
 })
 #endregion
 
@@ -1216,7 +1774,9 @@ $rbManual.Add_Checked({
         }
         $lblStatus.Text = 'Manual entry mode. Fill in the fields and click Add Device.'
     } catch {
-        $lblStatus.Text = "Failed to load lookup data: $($_.Exception.Message)"
+        $msg = $_.Exception.Message
+        if ($msg -match '401') { $msg = "$msg Check that your OAuth app has the correct scopes and that the instance URL matches the token issuer." }
+        $lblStatus.Text = "Failed to load lookup data: $msg"
     }
 })
 
@@ -1276,7 +1836,9 @@ $btnImportCsv.Add_Click({
     }
 
     try { Ensure-ApiCaches } catch {
-        $lblStatus.Text = "Failed to load lookup data: $($_.Exception.Message)"
+        $msg = $_.Exception.Message
+        if ($msg -match '401') { $msg = "$msg Check that your OAuth app has the correct scopes and that the instance URL matches the token issuer." }
+        $lblStatus.Text = "Failed to load lookup data: $msg"
         return
     }
 
@@ -1923,7 +2485,7 @@ $btnUpload.Add_Click({
         }
 
         try {
-            if (-not (Test-TokenValid)) { Invoke-TokenRefresh }
+            $bearerToken = Get-ValidBearerToken
             $boundary = [System.Guid]::NewGuid().ToString()
             $fileBytes = [System.IO.File]::ReadAllBytes($fileInfo.FullName)
             $enc = [System.Text.Encoding]::UTF8
@@ -1938,13 +2500,27 @@ $btnUpload.Add_Click({
             $bodyParts.AddRange([byte[]]$enc.GetBytes($closing))
 
             $bodyBytes = $bodyParts.ToArray()
-            $uploadUri = "$($script:NinjaBaseUrl)/ws/api/v2/related-items/entity/NODE/$deviceId/attachment"
+            $uploadUri = "$($script:NinjaBaseUrl)/api/v2/related-items/entity/NODE/$deviceId/attachment"
             $contentType = "multipart/form-data; boundary=`"$boundary`""
 
-            Invoke-RestMethod -Uri $uploadUri -Method POST `
-                -Headers @{ 'Authorization' = "Bearer $(ConvertFrom-SecureToken $script:AccessToken)" } `
-                -ContentType $contentType -Body $bodyBytes `
-                -UseBasicParsing -ErrorAction Stop | Out-Null
+            $uploadDone = $false
+            for ($uploadAttempt = 1; $uploadAttempt -le 2 -and -not $uploadDone; $uploadAttempt++) {
+                try {
+                    Invoke-RestMethod -Uri $uploadUri -Method POST `
+                        -Headers @{ 'Authorization' = "Bearer $bearerToken" } `
+                        -ContentType $contentType -Body $bodyBytes `
+                        -UseBasicParsing -ErrorAction Stop | Out-Null
+                    $uploadDone = $true
+                } catch {
+                    $uploadStatus = 0
+                    if ($_.Exception.Response) { $uploadStatus = [int]$_.Exception.Response.StatusCode }
+                    if ($uploadAttempt -eq 1 -and $uploadStatus -eq 401 -and (Test-RefreshTokenPresent)) {
+                        $script:TokenExpiresAt = [datetime]::MinValue
+                        Invoke-TokenRefresh
+                        $bearerToken = ConvertFrom-SecureToken $script:AccessToken
+                    } else { throw }
+                }
+            }
 
             $lbUploadFiles.Items.RemoveAt($i)
             $lbUploadFiles.Items.Insert($i,
@@ -2033,7 +2609,7 @@ $tbScanInput.Add_KeyDown({
         try {
             $deviceResult = Get-DeviceInfo -DeviceId $qr.Id
         } catch {
-            $requestUrl = "$($script:NinjaBaseUrl)/ws/api/v2/device/$($qr.Id)"
+            $requestUrl = "$($script:NinjaBaseUrl)/api/v2/device/$($qr.Id)"
             $errMsg = $_.Exception.Message
             $innerMsg = if ($_.Exception.InnerException) { $_.Exception.InnerException.Message } else { '' }
             $statusCode = ''
@@ -2173,6 +2749,8 @@ $window.Add_Closing({
         try { $script:AuthPS.Dispose() } catch { Write-Verbose "Auth runspace dispose during closing failed: $($_.Exception.Message)" }
     }
 
+    try { Save-CurrentSession } catch { Write-Verbose "Session save on close failed: $($_.Exception.Message)" }
+
     if ($script:AccessToken) {
         $script:AccessToken.Dispose()
         $script:AccessToken = $null
@@ -2184,6 +2762,7 @@ $window.Add_Closing({
     $script:TokenExpiresAt = [datetime]::MinValue
     $script:AuthVerifier   = $null
     $script:AuthState      = $null
+    $script:MasterPassword = $null
     [System.GC]::Collect()
 })
 #endregion

@@ -79,10 +79,10 @@ param(
     $Path,
 
     [string]
-    $NinjaOneInstance = "ca.ninjarmm.com",
+    $NinjaOneInstance = $env:NINJA_BASE_URL,
 
     [string]
-    $OutputDirectory = '.\AEUserQRCodes',
+    $OutputDirectory = '.\UserQRCodes',
 
     [ValidateRange(100, 600)]
     [int]
@@ -92,7 +92,7 @@ param(
     $UseQrApi = $true,
 
     [switch]
-    $PullAllFromApi = $true,
+    $PullAllFromApi,
 
     [Parameter()]
     [string]

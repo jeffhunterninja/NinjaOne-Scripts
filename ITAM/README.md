@@ -2,8 +2,6 @@
 
 Standalone PowerShell WPF application that combines equipment import (CSV or manual entry), device QR code generation, QR upload to devices as related items, and scan-and-assign (user + device QR codes → set device owner). Uses OAuth Authorization Code + PKCE; session state flows between tabs (e.g. imported device IDs pre-fill QR generation; QR output directory pre-fills the upload tab).
 
-***Note as of March 10th:*** You can consider this script to be in "early access" - I've tested it, but there can be great variations in how teams structure their ITAM setup. There is at least one bug with assigning users that I know of, but it really only impacts users who are both end users and technician accounts. I hope to fix this tomorrow.
-
 **Script:** [Invoke-NinjaITAMManager.ps1](Invoke-NinjaITAMManager.ps1)
 
 ## Prerequisites
@@ -19,6 +17,7 @@ Standalone PowerShell WPF application that combines equipment import (CSV or man
 |-----------|-------------|---------|
 | `NinjaOneInstance` | Instance hostname or base URL | `$env:NINJA_BASE_URL` or `ca.ninjarmm.com` |
 | `ClientId` | OAuth application Client ID | `$env:NinjaOneClientId` |
+| `AllowInsecureHttp` | Allows `http://` instance URLs for local testing only | Off (HTTPS required) |
 
 Connection settings can also be entered in the UI (Instance, Client ID) and persist for the session.
 
@@ -88,6 +87,10 @@ With parameters:
 
 **Typical flow:** Sign in → Import Equipment (CSV or manual) → Generate QR Codes ("From Import", choose dir/size, Generate) → Upload QR Codes (Scan Directory, Upload All) and/or Scan & Assign (scan user + devices, Assign).
 
+### Branded / partner portals
+
+For branded or partner portals (for example, `rcs-sales.rmmservice.ca`), set `NinjaOneInstance` (or `NINJA_BASE_URL`) to the branded host so that the entire OAuth Authorization Code + PKCE flow (authorize → consent → redirect back to `http://localhost`) stays on the same host. The script always uses the instance you provide for both `/ws/oauth/authorize` and `/ws/oauth/token`. If the browser is redirected to a regional host such as `https://ca.ninjarmm.com/ws/oauth/consent` and shows `Missing or empty sessionKey.`, that redirect and error are coming from the NinjaOne web application, not from this script.
+
 ## API and behavior
 
 - **Auth:** OAuth 2.0 Authorization Code + PKCE; token refresh when needed.
@@ -97,6 +100,6 @@ With parameters:
 
 ## Notes
 
-- **User QR codes:** For Scan & Assign (Tab 4), user QR codes can be generated with [New-NinjaUserQRCode.ps1](New-NinjaUserQRCode.ps1). Device QR codes are produced by Tab 2.
+- **User QR codes:** For Scan & Assign (Tab 4), user QR codes can be generated with [New-NinjaUserQRCode.ps1](QR%20Codes/New-NinjaUserQRCode.ps1). Device QR codes are produced by Tab 2.
 - **ITAM Scanner:** The [ITAM Scanner](ITAM%20Scanner/README.md) is a separate WPF app that does only the scan-and-assign workflow; the Manager includes that workflow in Tab 4.
 - **STA:** The script ensures WPF runs on an STA thread (spawns one if needed).

@@ -25,7 +25,7 @@
   Folder containing User_*.png files. Default matches New-NinjaUserQRCode.ps1 output.
 
 .PARAMETER NinjaOneInstance
-  NinjaOne instance hostname or base URL. Default: $env:NINJA_BASE_URL or ca.ninjarmm.com.
+  NinjaOne instance hostname or base URL. Default: $env:NINJA_BASE_URL or https://app.ninjarmm.com.
 
 .PARAMETER ClientId
   NinjaOne API application Client ID. Default: $env:NinjaOneClientId.
@@ -51,11 +51,11 @@
 param(
     [Parameter()]
     [string]
-    $ImageDirectory = '.\AEUserQRCodes',
+    $ImageDirectory = '.\UserQRCodes',
 
     [Parameter()]
     [string]
-    $NinjaOneInstance = 'rcs-sales.rmmservice.ca',
+    $NinjaOneInstance = $env:NINJA_BASE_URL,
 
     [string]
     $ClientId = $env:NinjaOneClientId,
@@ -69,7 +69,7 @@ param(
 
     [Parameter()]
     [switch]
-    $Replace = $true
+    $Replace
 )
 
 $ErrorActionPreference = 'Stop'
@@ -108,7 +108,7 @@ if ([string]::IsNullOrWhiteSpace($clientIdVal) -or [string]::IsNullOrWhiteSpace(
 }
 
 $NinjaBaseUrl = if ($NinjaOneInstance) { $NinjaOneInstance.Trim() } else { $env:NINJA_BASE_URL }
-if ([string]::IsNullOrWhiteSpace($NinjaBaseUrl)) { $NinjaBaseUrl = 'ca.ninjarmm.com' }
+if ([string]::IsNullOrWhiteSpace($NinjaBaseUrl)) { $NinjaBaseUrl = 'https://app.ninjarmm.com' }
 $NinjaBaseUrl = $NinjaBaseUrl.Trim()
 if ($NinjaBaseUrl -notmatch '^https?://') { $NinjaBaseUrl = "https://$NinjaBaseUrl" }
 $NinjaBaseUrl = $NinjaBaseUrl.TrimEnd('/')
