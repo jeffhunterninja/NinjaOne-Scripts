@@ -10,7 +10,7 @@ Standalone PowerShell WPF application that combines equipment import (CSV or man
 
 - **PowerShell:** 5.1 or later (script uses `#Requires -Version 5.1`).
 - **Platform:** Windows (WPF: `PresentationFramework`, `PresentationCore`, `WindowsBase`, `System.Windows.Forms`). Not compatible with PowerShell Core on non-Windows.
-- **NinjaOne OAuth app:** Configure in NinjaOne as **Native** (Authorization Code). Redirect URI must be `http://localhost:8888/`. Scopes: `monitoring`, `management`.
+- **NinjaOne OAuth app:** Configure in NinjaOne as **Native** (Authorization Code). Redirect URI must be `http://localhost:8888/` - you'll need to create the client app ID first, then delete the default redirect URI and add the correct one. Scopes: `monitoring`, `management`.
 - **Optional:** Tab 2 (Generate QR Codes) calls **api.qrserver.com** over HTTPS; no API key required. Outbound HTTPS is needed for that tab.
 
 ## Parameters and environment variables
