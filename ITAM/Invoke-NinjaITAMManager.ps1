@@ -8,7 +8,7 @@
     Standalone PowerShell WPF application (no dot-sourcing) combining four
     ITAM workflows:
 
-        Tab 1 - Import Equipment:   Create unmanaged devices from CSV or manual entry.
+        Tab 1 - Import Equipment:   Create unmanaged or staged devices from CSV or manual entry.
         Tab 2 - Generate QR Codes:  Create device dashboard QR code images.
         Tab 3 - Upload QR Codes:    Attach QR PNGs to devices as related items.
         Tab 4 - Scan & Assign:      Scan user/device QR codes to assign owners.
@@ -78,6 +78,7 @@ $script:AuthTimeoutAt    = [datetime]::MinValue
 $script:OrgCache         = $null
 $script:LocationCache    = $null
 $script:RoleCache        = $null
+$script:StagedRoleCache   = $null
 $script:CsvData          = $null
 
 $script:ImportedDevices  = [System.Collections.Generic.List[PSCustomObject]]::new()
@@ -525,12 +526,17 @@ function Invoke-NinjaApi {
             }
         }
         if ($Method -ne 'GET') {
-            if ($Body) {
-                $p.ContentType = 'application/json'
-                $p.Body = ($Body | ConvertTo-Json -Depth 10)
+            # DELETE with no body: do not send body (NinjaOne rejects DELETE with body -> 400)
+            if ($Method -eq 'DELETE' -and -not $Body) {
+                # omit ContentType and Body
             } else {
-                $p.ContentType = 'application/json'
-                $p.Body = '{}'
+                if ($Body) {
+                    $p.ContentType = 'application/json'
+                    $p.Body = ($Body | ConvertTo-Json -Depth 10)
+                } else {
+                    $p.ContentType = 'application/json'
+                    $p.Body = '{}'
+                }
             }
         }
         try {
@@ -574,7 +580,7 @@ function ConvertTo-ListItems {
 
     $psObj = $Response.PSObject
     if ($psObj) {
-        foreach ($propName in @('data', 'items', 'organizations', 'locations', 'roles', 'list')) {
+        foreach ($propName in @('data', 'items', 'organizations', 'locations', 'roles', 'list', 'users', 'contacts')) {
             if ($psObj.Properties[$propName]) {
                 $value = $Response.$propName
                 if ($value -is [Array]) {
@@ -609,12 +615,17 @@ function Ensure-ApiCaches {
         $locResp = Invoke-NinjaApi -Endpoint 'locations'
         $script:LocationCache = ConvertTo-ListItems -Response $locResp
     }
-    if ($null -eq $script:RoleCache) {
+    if ($null -eq $script:RoleCache -or $null -eq $script:StagedRoleCache) {
         $lblStatus.Text = 'Loading device roles...'
         Push-UIUpdate
         $rolesResp = Invoke-NinjaApi -Endpoint 'noderole/list'
         $allRoles = ConvertTo-ListItems -Response $rolesResp
-        $script:RoleCache = @($allRoles | Where-Object { $_.nodeClass -eq 'UNMANAGED_DEVICE' })
+        if ($null -eq $script:RoleCache) {
+            $script:RoleCache = @($allRoles | Where-Object { $_.nodeClass -eq 'UNMANAGED_DEVICE' })
+        }
+        if ($null -eq $script:StagedRoleCache) {
+            $script:StagedRoleCache = @($allRoles | Where-Object { $_.nodeClass -ne 'UNMANAGED_DEVICE' })
+        }
     }
 }
 
@@ -644,15 +655,16 @@ function ConvertTo-ScalarString {
 function Find-UserById {
     param([int]$UserId)
     try {
-        $allUsers = @(Invoke-NinjaApi -Endpoint 'users')
-        $matches = $allUsers | Where-Object { $_.id -eq $UserId }
+        $usersResp = Invoke-NinjaApi -Endpoint 'users'
+        $allUsers = @(ConvertTo-ListItems -Response $usersResp)
+        $matchedUsers = $allUsers | Where-Object { $_.id -eq $UserId }
         $m = $null
-        if ($matches) {
-            $m = $matches | Where-Object {
+        if ($matchedUsers) {
+            $m = $matchedUsers | Where-Object {
                 $_.PSObject.Properties['userType'] -and $_.userType -eq 'END_USER'
             } | Select-Object -First 1
             if (-not $m) {
-                $m = $matches | Select-Object -First 1
+                $m = $matchedUsers | Select-Object -First 1
             }
         }
         if ($m) {
@@ -671,7 +683,8 @@ function Find-UserById {
             }
             # User is TECHNICIAN or other; when same ID exists in contacts, prefer contact so assignment goes to end user.
             try {
-                $allContacts = @(Invoke-NinjaApi -Endpoint 'contacts')
+                $contactsResp = Invoke-NinjaApi -Endpoint 'contacts'
+                $allContacts = @(ConvertTo-ListItems -Response $contactsResp)
                 $c = $allContacts | Where-Object { $_.id -eq $UserId } | Select-Object -First 1
                 if ($c) {
                     $first = ConvertTo-ScalarString -Value $c.firstname
@@ -705,7 +718,8 @@ function Find-UserById {
         Write-Verbose "Failed user lookup in users endpoint for ID ${UserId}: $($_.Exception.Message)"
     }
     try {
-        $allContacts = @(Invoke-NinjaApi -Endpoint 'contacts')
+        $contactsResp = Invoke-NinjaApi -Endpoint 'contacts'
+        $allContacts = @(ConvertTo-ListItems -Response $contactsResp)
         $m = $allContacts | Where-Object { $_.id -eq $UserId } | Select-Object -First 1
         if ($m) {
             $first = ConvertTo-ScalarString -Value $m.firstname
@@ -783,8 +797,14 @@ function Set-NinjaDeviceOwner {
 function Get-QRData {
     param([string]$Text)
     $t = $Text.Trim()
-    if ($t -match 'userDashboard/(\d+)')   { return @{ Type = 'user';   Id = [int]$Matches[1] } }
-    if ($t -match 'deviceDashboard/(\d+)') { return @{ Type = 'device'; Id = [int]$Matches[1] } }
+    if ($t -match 'userDashboard/(\d+)') {
+        $id = [int]$Matches[1]
+        return @{ Type = 'user'; Id = $id }
+    }
+    if ($t -match 'deviceDashboard/(\d+)') {
+        $id = [int]$Matches[1]
+        return @{ Type = 'device'; Id = $id }
+    }
     return $null
 }
 
@@ -852,6 +872,62 @@ function Build-UnmanagedDeviceBody {
         warrantyEndDate   = (Get-DateToUnixSeconds -Date $WarrantyEnd)
         serialNumber      = $Serial
     }
+}
+
+function Build-StagedDeviceBody {
+    param(
+        [string]$Name,
+        [int]$OrgId,
+        [int]$LocationId,
+        [int]$RoleId,
+        [string]$AssignedUserUid,
+        [datetime]$WarrantyStart,
+        [datetime]$WarrantyEnd,
+        [string]$ItamAssetId,
+        [string]$ItamAssetStatus,
+        [long]$ItamAssetPurchaseDate,
+        [int]$ItamAssetPurchaseAmount,
+        [string]$ItamAssetExpectedLifetime,
+        [long]$ItamAssetEndOfLifeDate,
+        [string]$ItamAssetSerialNumber
+    )
+    $body = @{
+        name           = $Name
+        orgId          = $OrgId
+        locationId     = $LocationId
+        roleId         = $RoleId
+    }
+    if (-not [string]::IsNullOrWhiteSpace($AssignedUserUid)) {
+        $body['assignedUserUid'] = $AssignedUserUid.Trim()
+    }
+    if ($WarrantyStart) {
+        $body['warrantyStartDate'] = (Get-DateToUnixSeconds -Date $WarrantyStart)
+    }
+    if ($WarrantyEnd) {
+        $body['warrantyEndDate'] = (Get-DateToUnixSeconds -Date $WarrantyEnd)
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ItamAssetId)) {
+        $body['itamAssetId'] = $ItamAssetId.Trim()
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ItamAssetStatus)) {
+        $body['itamAssetStatus'] = $ItamAssetStatus.Trim()
+    }
+    if ($ItamAssetPurchaseDate -ne $null -and $ItamAssetPurchaseDate -ne 0) {
+        $body['itamAssetPurchaseDate'] = $ItamAssetPurchaseDate
+    }
+    if ($ItamAssetPurchaseAmount -ne $null) {
+        $body['itamAssetPurchaseAmount'] = $ItamAssetPurchaseAmount
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ItamAssetExpectedLifetime)) {
+        $body['itamAssetExpectedLifetime'] = $ItamAssetExpectedLifetime.Trim().ToLower()
+    }
+    if ($ItamAssetEndOfLifeDate -ne $null -and $ItamAssetEndOfLifeDate -ne 0) {
+        $body['itamAssetEndOfLifeDate'] = $ItamAssetEndOfLifeDate
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ItamAssetSerialNumber)) {
+        $body['itamAssetSerialNumber'] = $ItamAssetSerialNumber.Trim()
+    }
+    return $body
 }
 
 function Build-AssetCustomFieldsBody {
@@ -1049,52 +1125,60 @@ $xaml = @"
                     <RowDefinition Height="32"/>
                     <RowDefinition Height="32"/>
                     <RowDefinition Height="32"/>
+                    <RowDefinition Height="32"/>
                   </Grid.RowDefinitions>
-                  <TextBlock Grid.Row="0" Text="Name *" VerticalAlignment="Center"/>
-                  <TextBox Grid.Row="0" Grid.Column="1" x:Name="tbManualName"
+                  <TextBlock Grid.Row="0" Text="Device type *" VerticalAlignment="Center"/>
+                  <StackPanel Grid.Row="0" Grid.Column="1" Orientation="Horizontal">
+                    <RadioButton x:Name="rbManualUnmanaged" Content="Unmanaged device" IsChecked="True"
+                                Margin="0,0,16,0" VerticalAlignment="Center"/>
+                    <RadioButton x:Name="rbManualStaged" Content="Staged device"
+                                VerticalAlignment="Center"/>
+                  </StackPanel>
+                  <TextBlock Grid.Row="1" Text="Name *" VerticalAlignment="Center"/>
+                  <TextBox Grid.Row="1" Grid.Column="1" x:Name="tbManualName"
                            Height="26" VerticalContentAlignment="Center"/>
-                  <TextBlock Grid.Row="1" Text="Role *" VerticalAlignment="Center"/>
-                  <ComboBox Grid.Row="1" Grid.Column="1" x:Name="cbManualRole"
+                  <TextBlock Grid.Row="2" Text="Role *" VerticalAlignment="Center"/>
+                  <ComboBox Grid.Row="2" Grid.Column="1" x:Name="cbManualRole"
                             Height="26"/>
-                  <TextBlock Grid.Row="2" Text="Organization *" VerticalAlignment="Center"/>
-                  <ComboBox Grid.Row="2" Grid.Column="1" x:Name="cbManualOrg"
+                  <TextBlock Grid.Row="3" Text="Organization *" VerticalAlignment="Center"/>
+                  <ComboBox Grid.Row="3" Grid.Column="1" x:Name="cbManualOrg"
                             Height="26"/>
-                  <TextBlock Grid.Row="3" Text="Location *" VerticalAlignment="Center"/>
-                  <ComboBox Grid.Row="3" Grid.Column="1" x:Name="cbManualLoc"
+                  <TextBlock Grid.Row="4" Text="Location *" VerticalAlignment="Center"/>
+                  <ComboBox Grid.Row="4" Grid.Column="1" x:Name="cbManualLoc"
                             Height="26"/>
-                  <TextBlock Grid.Row="4" Text="Serial Number" VerticalAlignment="Center"/>
-                  <TextBox Grid.Row="4" Grid.Column="1" x:Name="tbManualSerial"
+                  <TextBlock Grid.Row="5" Text="Serial Number" VerticalAlignment="Center"/>
+                  <TextBox Grid.Row="5" Grid.Column="1" x:Name="tbManualSerial"
                            Height="26" VerticalContentAlignment="Center"/>
-                  <TextBlock Grid.Row="5" Text="Make" VerticalAlignment="Center"/>
-                  <TextBox Grid.Row="5" Grid.Column="1" x:Name="tbManualMake"
+                  <TextBlock Grid.Row="6" Text="Make" VerticalAlignment="Center"/>
+                  <TextBox Grid.Row="6" Grid.Column="1" x:Name="tbManualMake"
                            Height="26" VerticalContentAlignment="Center"/>
-                  <TextBlock Grid.Row="6" Text="Model" VerticalAlignment="Center"/>
-                  <TextBox Grid.Row="6" Grid.Column="1" x:Name="tbManualModel"
+                  <TextBlock Grid.Row="7" Text="Model" VerticalAlignment="Center"/>
+                  <TextBox Grid.Row="7" Grid.Column="1" x:Name="tbManualModel"
                            Height="26" VerticalContentAlignment="Center"/>
-                  <TextBlock Grid.Row="7" Text="Purchase Date" VerticalAlignment="Center"/>
-                  <TextBox Grid.Row="7" Grid.Column="1" x:Name="tbManualPurchDate"
+                  <TextBlock Grid.Row="8" Text="Purchase Date" VerticalAlignment="Center"/>
+                  <TextBox Grid.Row="8" Grid.Column="1" x:Name="tbManualPurchDate"
                            Height="26" VerticalContentAlignment="Center"
                            ToolTip="YYYY-MM-DD"/>
-                  <TextBlock Grid.Row="8" Text="Purchase Amt" VerticalAlignment="Center"/>
-                  <TextBox Grid.Row="8" Grid.Column="1" x:Name="tbManualAmount"
+                  <TextBlock Grid.Row="9" Text="Purchase Amt" VerticalAlignment="Center"/>
+                  <TextBox Grid.Row="9" Grid.Column="1" x:Name="tbManualAmount"
                            Height="26" VerticalContentAlignment="Center"/>
-                  <TextBlock Grid.Row="9" Text="Warranty Start" VerticalAlignment="Center"/>
-                  <TextBox Grid.Row="9" Grid.Column="1" x:Name="tbManualWarrantyStart"
+                  <TextBlock Grid.Row="10" Text="Warranty Start" VerticalAlignment="Center"/>
+                  <TextBox Grid.Row="10" Grid.Column="1" x:Name="tbManualWarrantyStart"
                            Height="26" VerticalContentAlignment="Center"
                            ToolTip="YYYY-MM-DD"/>
-                  <TextBlock Grid.Row="10" Text="Warranty End" VerticalAlignment="Center"/>
-                  <TextBox Grid.Row="10" Grid.Column="1" x:Name="tbManualWarrantyEnd"
+                  <TextBlock Grid.Row="11" Text="Warranty End" VerticalAlignment="Center"/>
+                  <TextBox Grid.Row="11" Grid.Column="1" x:Name="tbManualWarrantyEnd"
                            Height="26" VerticalContentAlignment="Center"
                            ToolTip="YYYY-MM-DD"/>
-                  <TextBlock Grid.Row="11" Text="Asset Status" VerticalAlignment="Center"/>
-                  <TextBox Grid.Row="11" Grid.Column="1" x:Name="tbManualAssetStatus"
+                  <TextBlock Grid.Row="12" Text="Asset Status" VerticalAlignment="Center"/>
+                  <TextBox Grid.Row="12" Grid.Column="1" x:Name="tbManualAssetStatus"
                            Height="26" VerticalContentAlignment="Center"
                            ToolTip="e.g. In Use, Retired"/>
-                  <TextBlock Grid.Row="12" Text="Expected Life" VerticalAlignment="Center"/>
-                  <ComboBox Grid.Row="12" Grid.Column="1" x:Name="cbManualExpLifetime"
+                  <TextBlock Grid.Row="13" Text="Expected Life" VerticalAlignment="Center"/>
+                  <ComboBox Grid.Row="13" Grid.Column="1" x:Name="cbManualExpLifetime"
                             Height="26"/>
-                  <TextBlock Grid.Row="13" Text="End of Life" VerticalAlignment="Center"/>
-                  <TextBox Grid.Row="13" Grid.Column="1" x:Name="tbManualEolDate"
+                  <TextBlock Grid.Row="14" Text="End of Life" VerticalAlignment="Center"/>
+                  <TextBox Grid.Row="14" Grid.Column="1" x:Name="tbManualEolDate"
                            Height="26" VerticalContentAlignment="Center"
                            ToolTip="YYYY-MM-DD"/>
                 </Grid>
@@ -1317,6 +1401,8 @@ $tbCsvPath           = $window.FindName('tbCsvPath')
 $btnBrowseCsv        = $window.FindName('btnBrowseCsv')
 $btnImportCsv        = $window.FindName('btnImportCsv')
 $dgCsvPreview        = $window.FindName('dgCsvPreview')
+$rbManualUnmanaged   = $window.FindName('rbManualUnmanaged')
+$rbManualStaged      = $window.FindName('rbManualStaged')
 $tbManualName        = $window.FindName('tbManualName')
 $cbManualRole        = $window.FindName('cbManualRole')
 $cbManualOrg         = $window.FindName('cbManualOrg')
@@ -1519,6 +1605,7 @@ $btnSignIn.Add_Click({
             $script:OrgCache      = $null
             $script:LocationCache = $null
             $script:RoleCache     = $null
+            $script:StagedRoleCache = $null
             $btnSignIn.IsEnabled = $true
             return
         } catch {
@@ -1685,6 +1772,7 @@ $btnSignIn.Add_Click({
                 $script:OrgCache      = $null
                 $script:LocationCache = $null
                 $script:RoleCache     = $null
+            $script:StagedRoleCache = $null
             }
             elseif ($queryString -match '[?&]error=([^&]+)') {
                 $errMsg = [uri]::UnescapeDataString($Matches[1])
@@ -1742,6 +1830,22 @@ $rbCsv.Add_Checked({
     $pnlManual.Visibility = 'Collapsed'
 })
 
+function Update-ManualRoleComboBox {
+    $cbManualRole.Items.Clear()
+    $roleSource = if ($rbManualStaged.IsChecked -eq $true) { $script:StagedRoleCache } else { $script:RoleCache }
+    if (-not $roleSource) { return }
+    foreach ($r in $roleSource) {
+        $roleName = $r.name
+        if ($roleName -is [Array]) {
+            $roleName = $roleName | Select-Object -First 1
+        }
+        $roleName = $roleName -as [string]
+        if (-not [string]::IsNullOrWhiteSpace($roleName)) {
+            $cbManualRole.Items.Add($roleName) | Out-Null
+        }
+    }
+}
+
 $rbManual.Add_Checked({
     $pnlCsv.Visibility = 'Collapsed'
     $pnlManual.Visibility = 'Visible'
@@ -1760,18 +1864,7 @@ $rbManual.Add_Checked({
                 }
             }
         }
-        if ($cbManualRole.Items.Count -eq 0) {
-            foreach ($r in $script:RoleCache) {
-                $roleName = $r.name
-                if ($roleName -is [Array]) {
-                    $roleName = $roleName | Select-Object -First 1
-                }
-                $roleName = $roleName -as [string]
-                if (-not [string]::IsNullOrWhiteSpace($roleName)) {
-                    $cbManualRole.Items.Add($roleName) | Out-Null
-                }
-            }
-        }
+        Update-ManualRoleComboBox
         $lblStatus.Text = 'Manual entry mode. Fill in the fields and click Add Device.'
     } catch {
         $msg = $_.Exception.Message
@@ -1779,6 +1872,9 @@ $rbManual.Add_Checked({
         $lblStatus.Text = "Failed to load lookup data: $msg"
     }
 })
+
+$rbManualUnmanaged.Add_Checked({ Update-ManualRoleComboBox })
+$rbManualStaged.Add_Checked({ Update-ManualRoleComboBox })
 
 $cbManualOrg.Add_SelectionChanged({
     $cbManualLoc.Items.Clear()
@@ -1865,6 +1961,9 @@ $btnImportCsv.Add_Click({
         Push-UIUpdate
 
         try {
+            $deviceTypeRaw = Get-RowValue -Row $row -ColumnName 'DeviceType'
+            $isStaged = [string]::Equals($deviceTypeRaw.Trim(), 'Staged', [StringComparison]::OrdinalIgnoreCase)
+
             $name     = Get-RowValue -Row $row -ColumnName 'Name'
             $roleName = Get-RowValue -Row $row -ColumnName 'RoleName'
             if ([string]::IsNullOrWhiteSpace($roleName)) {
@@ -1901,20 +2000,22 @@ $btnImportCsv.Add_Click({
                 throw "Row must have OrganizationName/LocationName or OrganizationId/LocationId."
             }
 
-            $roleMatch = $script:RoleCache |
+            $roleSource = if ($isStaged) { $script:StagedRoleCache } else { $script:RoleCache }
+            $roleMatch = $roleSource |
                 Where-Object { $_.name -eq $roleName } |
                 Select-Object -First 1
             if (-not $roleMatch) {
-                throw "Unmanaged device role not found: '$roleName'."
+                $kind = if ($isStaged) { 'Staged' } else { 'Unmanaged' }
+                throw "$kind device role not found: '$roleName'."
             }
             $roleId = $roleMatch.id
 
             $displayName = $name
+            $make  = Get-RowValue -Row $row -ColumnName 'Make'
+            $model = Get-RowValue -Row $row -ColumnName 'Model'
             if ([string]::IsNullOrWhiteSpace($displayName)) {
-                $make  = Get-RowValue -Row $row -ColumnName 'Make'
-                $model = Get-RowValue -Row $row -ColumnName 'Model'
                 $displayName = if ($make -and $model) { "$make $model" }
-                               else { "Unmanaged $roleName $rowNum" }
+                               else { if ($isStaged) { "Staged $roleName $rowNum" } else { "Unmanaged $roleName $rowNum" } }
             }
 
             $serial = Get-RowValue -Row $row -ColumnName 'SerialNumber'
@@ -1940,68 +2041,93 @@ $btnImportCsv.Add_Click({
             $assetStatus      = Get-RowValue -Row $row -ColumnName 'AssetStatus'
             $expectedLifetime = Get-RowValue -Row $row -ColumnName 'ExpectedLifetime'
             $eolStr           = Get-RowValue -Row $row -ColumnName 'EndOfLifeDate'
-            $make   = Get-RowValue -Row $row -ColumnName 'Make'
-            $model  = Get-RowValue -Row $row -ColumnName 'Model'
             $purch  = Get-RowValue -Row $row -ColumnName 'PurchaseDate'
             $amount = Get-RowValue -Row $row -ColumnName 'PurchaseAmount'
 
-            $body = Build-UnmanagedDeviceBody `
-                -DisplayName $displayName `
-                -RoleId $roleId `
-                -OrgId $orgId `
-                -LocationId $locId `
-                -WarrantyStart $warrantyStart `
-                -WarrantyEnd $warrantyEnd `
-                -Serial $serial
-
-            $result = Invoke-NinjaApi -Method POST -Endpoint 'itam/unmanaged-device' -Body $body
-            $nodeId = $result.nodeId
-            if (-not $nodeId) { throw "API did not return a nodeId." }
-
-            if ($make -or $model -or $purch -or $amount -or $serial `
-                -or $assetStatus -or $expectedLifetime -or $eolStr) {
-                $parsedPurch = ConvertTo-OptionalDateParseResult -Value $purch
-                if (-not $parsedPurch.Success) {
-                    $warnings.Add("Row ${rowNum}: PurchaseDate - $($parsedPurch.Message) Value skipped.")
-                }
-                $parsedEol = ConvertTo-OptionalDateParseResult -Value $eolStr
-                if (-not $parsedEol.Success) {
-                    $warnings.Add("Row ${rowNum}: EndOfLifeDate - $($parsedEol.Message) Value skipped.")
-                }
-                $parsedAmount = ConvertTo-OptionalIntAmountParseResult -Value $amount
-                if (-not $parsedAmount.Success) {
-                    $warnings.Add("Row ${rowNum}: PurchaseAmount - $($parsedAmount.Message) Value skipped.")
-                }
-
-                $cf = Build-AssetCustomFieldsBody `
-                    -Make $make `
-                    -Model $model `
-                    -Serial $serial `
-                    -AssetStatus $assetStatus `
-                    -ExpectedLifetime $expectedLifetime `
-                    -PurchaseDate $parsedPurch.Date `
-                    -EndOfLifeDate $parsedEol.Date `
-                    -PurchaseAmount $parsedAmount.Amount
-
-                if ($cf.Count -gt 0) {
-                    try {
-                        Invoke-NinjaApi -Method PATCH `
-                            -Endpoint "device/$nodeId/custom-fields" `
-                            -Body $cf | Out-Null
-                    } catch {
-                        $warnings.Add("Row ${rowNum}: Created device $nodeId but custom-fields update failed: $($_.Exception.Message)")
-                    }
-                }
+            $parsedPurch = ConvertTo-OptionalDateParseResult -Value $purch
+            if (-not $parsedPurch.Success) {
+                $warnings.Add("Row ${rowNum}: PurchaseDate - $($parsedPurch.Message) Value skipped.")
+            }
+            $parsedEol = ConvertTo-OptionalDateParseResult -Value $eolStr
+            if (-not $parsedEol.Success) {
+                $warnings.Add("Row ${rowNum}: EndOfLifeDate - $($parsedEol.Message) Value skipped.")
+            }
+            $parsedAmount = ConvertTo-OptionalIntAmountParseResult -Value $amount
+            if (-not $parsedAmount.Success) {
+                $warnings.Add("Row ${rowNum}: PurchaseAmount - $($parsedAmount.Message) Value skipped.")
             }
 
-            $script:ImportedDevices.Add([PSCustomObject]@{
-                Id   = $nodeId
-                Name = $displayName
-                Role = $roleName
-            })
-            $lbImportResults.Items.Add(
-                "ID: $nodeId | $displayName ($roleName)") | Out-Null
-            $created++
+            if ($isStaged) {
+                $purchDateMs = 0
+                $eolDateMs   = 0
+                if ($parsedPurch.Date) { $purchDateMs = (ConvertTo-UnixMilliseconds -Date $parsedPurch.Date) }
+                if ($parsedEol.Date)    { $eolDateMs   = (ConvertTo-UnixMilliseconds -Date $parsedEol.Date) }
+                $stagedBody = Build-StagedDeviceBody `
+                    -Name $displayName `
+                    -OrgId $orgId `
+                    -LocationId $locId `
+                    -RoleId $roleId `
+                    -WarrantyStart $warrantyStart `
+                    -WarrantyEnd $warrantyEnd `
+                    -ItamAssetStatus $assetStatus `
+                    -ItamAssetExpectedLifetime $expectedLifetime `
+                    -ItamAssetSerialNumber $serial `
+                    -ItamAssetPurchaseDate $purchDateMs `
+                    -ItamAssetPurchaseAmount $parsedAmount.Amount `
+                    -ItamAssetEndOfLifeDate $eolDateMs
+                $result = Invoke-NinjaApi -Method POST -Endpoint 'staged-device' -Body $stagedBody
+                $nodeId = $result.nodeId
+                if (-not $nodeId -and $result.id) { $nodeId = $result.id }
+                if (-not $nodeId) { throw "API did not return a nodeId or id." }
+                $script:ImportedDevices.Add([PSCustomObject]@{ Id = $nodeId; Name = $displayName; Role = $roleName })
+                $lbImportResults.Items.Add("ID: $nodeId | $displayName (Staged $roleName)") | Out-Null
+                $created++
+            } else {
+                $body = Build-UnmanagedDeviceBody `
+                    -DisplayName $displayName `
+                    -RoleId $roleId `
+                    -OrgId $orgId `
+                    -LocationId $locId `
+                    -WarrantyStart $warrantyStart `
+                    -WarrantyEnd $warrantyEnd `
+                    -Serial $serial
+
+                $result = Invoke-NinjaApi -Method POST -Endpoint 'itam/unmanaged-device' -Body $body
+                $nodeId = $result.nodeId
+                if (-not $nodeId) { throw "API did not return a nodeId." }
+
+                if ($make -or $model -or $purch -or $amount -or $serial `
+                    -or $assetStatus -or $expectedLifetime -or $eolStr) {
+                    $cf = Build-AssetCustomFieldsBody `
+                        -Make $make `
+                        -Model $model `
+                        -Serial $serial `
+                        -AssetStatus $assetStatus `
+                        -ExpectedLifetime $expectedLifetime `
+                        -PurchaseDate $parsedPurch.Date `
+                        -EndOfLifeDate $parsedEol.Date `
+                        -PurchaseAmount $parsedAmount.Amount
+
+                    if ($cf.Count -gt 0) {
+                        try {
+                            Invoke-NinjaApi -Method PATCH `
+                                -Endpoint "device/$nodeId/custom-fields" `
+                                -Body $cf | Out-Null
+                        } catch {
+                            $warnings.Add("Row ${rowNum}: Created device $nodeId but custom-fields update failed: $($_.Exception.Message)")
+                        }
+                    }
+                }
+
+                $script:ImportedDevices.Add([PSCustomObject]@{
+                    Id   = $nodeId
+                    Name = $displayName
+                    Role = $roleName
+                })
+                $lbImportResults.Items.Add(
+                    "ID: $nodeId | $displayName ($roleName)") | Out-Null
+                $created++
+            }
         } catch {
             $failed++
             $errors.Add("Row ${rowNum}: $($_.Exception.Message)")
@@ -2046,12 +2172,14 @@ $btnManualAdd.Add_Click({
         return
     }
 
+    $isStaged = $rbManualStaged.IsChecked -eq $true
+    $roleSource = if ($isStaged) { $script:StagedRoleCache } else { $script:RoleCache }
     $make  = $tbManualMake.Text.Trim()
     $model = $tbManualModel.Text.Trim()
     $displayName = $name
     if ([string]::IsNullOrWhiteSpace($displayName)) {
         $displayName = if ($make -and $model) { "$make $model" }
-                       else { "Unmanaged $roleName" }
+                       else { if ($isStaged) { "Staged $roleName" } else { "Unmanaged $roleName" } }
     }
 
     $orgMatch = $script:OrgCache |
@@ -2060,7 +2188,7 @@ $btnManualAdd.Add_Click({
         ($_.name -eq $locName) -and
         (($_.organizationID -eq $orgMatch.id) -or ($_.organizationId -eq $orgMatch.id))
     } | Select-Object -First 1
-    $roleMatch = $script:RoleCache |
+    $roleMatch = $roleSource |
         Where-Object { $_.name -eq $roleName } | Select-Object -First 1
 
     if (-not $orgMatch -or -not $locMatch -or -not $roleMatch) {
@@ -2116,57 +2244,84 @@ $btnManualAdd.Add_Click({
         return
     }
 
-    $body = Build-UnmanagedDeviceBody `
-        -DisplayName $displayName `
-        -RoleId $roleMatch.id `
-        -OrgId $orgMatch.id `
-        -LocationId $locMatch.id `
-        -WarrantyStart $warrantyStart `
-        -WarrantyEnd $warrantyEnd `
-        -Serial $serial
-
     $btnManualAdd.IsEnabled = $false
     $lblStatus.Text = "Creating device '$displayName'..."
     Push-UIUpdate
 
     try {
-        $result = Invoke-NinjaApi -Method POST `
-            -Endpoint 'itam/unmanaged-device' -Body $body
-        $nodeId = $result.nodeId
-        if (-not $nodeId) { throw "API did not return a nodeId." }
+        if ($isStaged) {
+            $purchDateMs = 0
+            $eolDateMs   = 0
+            if ($parsedPurch.Date) { $purchDateMs = (ConvertTo-UnixMilliseconds -Date $parsedPurch.Date) }
+            if ($parsedEol.Date)    { $eolDateMs   = (ConvertTo-UnixMilliseconds -Date $parsedEol.Date) }
+            $stagedBody = Build-StagedDeviceBody `
+                -Name $displayName `
+                -OrgId $orgMatch.id `
+                -LocationId $locMatch.id `
+                -RoleId $roleMatch.id `
+                -WarrantyStart $warrantyStart `
+                -WarrantyEnd $warrantyEnd `
+                -ItamAssetStatus $assetStatus `
+                -ItamAssetExpectedLifetime $expectedLifetime `
+                -ItamAssetSerialNumber $serial `
+                -ItamAssetPurchaseDate $purchDateMs `
+                -ItamAssetPurchaseAmount $parsedAmount.Amount `
+                -ItamAssetEndOfLifeDate $eolDateMs
+            $result = Invoke-NinjaApi -Method POST -Endpoint 'staged-device' -Body $stagedBody
+            $nodeId = $result.nodeId
+            if (-not $nodeId -and $result.id) { $nodeId = $result.id }
+            if (-not $nodeId) { throw "API did not return a nodeId or id." }
+            $script:ImportedDevices.Add([PSCustomObject]@{ Id = $nodeId; Name = $displayName; Role = $roleName })
+            $lbImportResults.Items.Add("ID: $nodeId | $displayName (Staged $roleName)") | Out-Null
+            $lblImportCount.Text = $script:ImportedDevices.Count.ToString()
+            $lblStatus.Text = "Created staged device '$displayName' (ID: $nodeId)."
+        } else {
+            $body = Build-UnmanagedDeviceBody `
+                -DisplayName $displayName `
+                -RoleId $roleMatch.id `
+                -OrgId $orgMatch.id `
+                -LocationId $locMatch.id `
+                -WarrantyStart $warrantyStart `
+                -WarrantyEnd $warrantyEnd `
+                -Serial $serial
+            $result = Invoke-NinjaApi -Method POST `
+                -Endpoint 'itam/unmanaged-device' -Body $body
+            $nodeId = $result.nodeId
+            if (-not $nodeId) { throw "API did not return a nodeId." }
 
-        $customFieldsWarning = $null
-        if ($make -or $model -or $purch -or $amount -or $serial `
-            -or $assetStatus -or $expectedLifetime -or $eolStr) {
-            $cf = Build-AssetCustomFieldsBody `
-                -Make $make `
-                -Model $model `
-                -Serial $serial `
-                -AssetStatus $assetStatus `
-                -ExpectedLifetime $expectedLifetime `
-                -PurchaseDate $parsedPurch.Date `
-                -EndOfLifeDate $parsedEol.Date `
-                -PurchaseAmount $parsedAmount.Amount
-            if ($cf.Count -gt 0) {
-                try {
-                    Invoke-NinjaApi -Method PATCH `
-                        -Endpoint "device/$nodeId/custom-fields" `
-                        -Body $cf | Out-Null
-                } catch {
-                    $customFieldsWarning = " Custom-fields update warning: $($_.Exception.Message)"
+            $customFieldsWarning = $null
+            if ($make -or $model -or $purch -or $amount -or $serial `
+                -or $assetStatus -or $expectedLifetime -or $eolStr) {
+                $cf = Build-AssetCustomFieldsBody `
+                    -Make $make `
+                    -Model $model `
+                    -Serial $serial `
+                    -AssetStatus $assetStatus `
+                    -ExpectedLifetime $expectedLifetime `
+                    -PurchaseDate $parsedPurch.Date `
+                    -EndOfLifeDate $parsedEol.Date `
+                    -PurchaseAmount $parsedAmount.Amount
+                if ($cf.Count -gt 0) {
+                    try {
+                        Invoke-NinjaApi -Method PATCH `
+                            -Endpoint "device/$nodeId/custom-fields" `
+                            -Body $cf | Out-Null
+                    } catch {
+                        $customFieldsWarning = " Custom-fields update warning: $($_.Exception.Message)"
+                    }
                 }
             }
-        }
 
-        $script:ImportedDevices.Add([PSCustomObject]@{
-            Id   = $nodeId
-            Name = $displayName
-            Role = $roleName
-        })
-        $lbImportResults.Items.Add(
-            "ID: $nodeId | $displayName ($roleName)") | Out-Null
-        $lblImportCount.Text = $script:ImportedDevices.Count.ToString()
-        $lblStatus.Text = "Created '$displayName' (ID: $nodeId).$customFieldsWarning"
+            $script:ImportedDevices.Add([PSCustomObject]@{
+                Id   = $nodeId
+                Name = $displayName
+                Role = $roleName
+            })
+            $lbImportResults.Items.Add(
+                "ID: $nodeId | $displayName ($roleName)") | Out-Null
+            $lblImportCount.Text = $script:ImportedDevices.Count.ToString()
+            $lblStatus.Text = "Created '$displayName' (ID: $nodeId).$customFieldsWarning"
+        }
         [System.Media.SystemSounds]::Asterisk.Play()
 
         $tbManualName.Clear()
@@ -2569,7 +2724,7 @@ $tbScanInput.Add_KeyDown({
     }
 
     if ($qr.Type -eq 'user') {
-        $lblStatus.Text = "Looking up user $($qr.Id)..."
+        $lblStatus.Text = "Scanned user ID: $($qr.Id). Looking up..."
         Push-UIUpdate
         try {
             $userResult = Find-UserById -UserId $qr.Id
@@ -2604,7 +2759,7 @@ $tbScanInput.Add_KeyDown({
             [System.Media.SystemSounds]::Exclamation.Play()
             return
         }
-        $lblStatus.Text = "Looking up device $($qr.Id)..."
+        $lblStatus.Text = "Scanned device ID: $($qr.Id). Looking up..."
         Push-UIUpdate
         try {
             $deviceResult = Get-DeviceInfo -DeviceId $qr.Id
@@ -2618,6 +2773,7 @@ $tbScanInput.Add_KeyDown({
             }
             $detail = "Device $($qr.Id) lookup failed.`r`n`r`nRequest URL:`r`n$requestUrl`r`n`r`nError:$statusCode`r`n$errMsg"
             if ($innerMsg) { $detail += "`r`n`r`nInner: $innerMsg" }
+            $detail += "`r`n`r`nIf this is a newly imported or staged device, it may need to be approved first or take a moment to appear in the device list. Assignment requires the device to exist in NinjaOne."
             $lblStatus.Text = "Device $($qr.Id) not found or API error. See details."
             [System.Windows.MessageBox]::Show($detail, 'Device lookup failed', 'OK', 'Warning') | Out-Null
             [System.Media.SystemSounds]::Hand.Play()

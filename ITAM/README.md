@@ -26,12 +26,16 @@ Connection settings can also be entered in the UI (Instance, Client ID) and pers
 
 ### Tab 1 — Import Equipment
 
-- **CSV:** Browse to a CSV file; a preview loads. Click "Import" to create unmanaged devices in NinjaOne.
-  - **Required:** `RoleName` (must match an unmanaged-device role in NinjaOne).
+You can create **unmanaged devices** (e.g. docks, monitors, peripherals) or **staged devices** (e.g. laptops created before the agent is installed). Staged devices use the `staged-device` API so the record exists in NinjaOne before the agent is deployed.
+
+- **CSV:** Browse to a CSV file; a preview loads. Click "Import" to create devices in NinjaOne.
+  - **Device type (optional):** Column `DeviceType` with values `Unmanaged` or `Staged`. If missing or invalid, the row is treated as Unmanaged.
+  - **Required:** `RoleName` — must match an **unmanaged-device** role (e.g. Dock, Keyboard, Monitor) when `DeviceType` is Unmanaged, or a **managed/staged** role (e.g. Windows Workstation) when `DeviceType` is Staged.
   - **Org/Location:** Provide either `OrganizationId` + `LocationId` **or** `OrganizationName` + `LocationName`.
-  - **Optional:** Name, Make, Model, SerialNumber, WarrantyStartDate, WarrantyEndDate, PurchaseDate, PurchaseAmount, AssetStatus, ExpectedLifetime, EndOfLifeDate. If Name is omitted, it is derived from Make/Model or "Unmanaged {RoleName} {row number}".
-  - Devices are created via `itam/unmanaged-device`; then custom fields (manufacturer, model, itamAssetSerialNumber, itamAssetPurchaseDate, itamAssetPurchaseAmount, itamAssetStatus, itamAssetExpectedLifetime, itamAssetEndOfLifeDate) are patched when provided.
-- **Manual:** Select Organization (locations load), Role, and Location; fill Name, Serial, Make, Model, Purchase Date/Amount, Warranty Start/End, Asset Status; click "Add Device". Same API as CSV.
+  - **Optional:** Name, Make, Model, SerialNumber, WarrantyStartDate, WarrantyEndDate, PurchaseDate, PurchaseAmount, AssetStatus, ExpectedLifetime, EndOfLifeDate. If Name is omitted, it is derived from Make/Model or "Unmanaged {RoleName} {row number}" / "Staged {RoleName} {row number}".
+  - **Unmanaged rows:** Created via `itam/unmanaged-device`; then custom fields are patched when provided.
+  - **Staged rows:** Created via `staged-device` with the same org/location/role and optional itam fields in the request body.
+- **Manual:** Choose **Device type** (Unmanaged device or Staged device). The Role list shows unmanaged roles or staged/managed roles depending on the selection. Select Organization (locations load), Role, and Location; fill Name, Serial, Make, Model, Purchase Date/Amount, Warranty Start/End, Asset Status; click "Add Device".
 - The list of imported devices is used by Tab 2 ("From Import").
 
 ### Tab 2 — Generate QR Codes
@@ -57,7 +61,8 @@ Connection settings can also be entered in the UI (Instance, Client ID) and pers
 
 - **Encoding:** UTF-8 (script uses `Import-Csv -Encoding UTF8`).
 - **Columns (case-insensitive):**
-  - **Required:** `RoleName` (must match an unmanaged-device role in NinjaOne).
+  - **Optional:** `DeviceType` — `Unmanaged` or `Staged`. Defaults to Unmanaged when missing or invalid. Use Staged for devices (e.g. laptops) that will get the agent later.
+  - **Required:** `RoleName` — must match an unmanaged-device role (Unmanaged rows) or a managed/staged role (Staged rows) in NinjaOne.
   - **Org/Location (one of):** `OrganizationId` + `LocationId` **or** `OrganizationName` + `LocationName`.
   - **Optional:** `Name`, `Make`, `Model`, `SerialNumber`, `WarrantyStartDate`, `WarrantyEndDate`, `PurchaseDate`, `PurchaseAmount`, `AssetStatus`, `ExpectedLifetime`, `EndOfLifeDate`.
 - **Dates:** Parsed with standard .NET date parsing (e.g. YYYY-MM-DD).
