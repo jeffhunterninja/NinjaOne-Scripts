@@ -19,6 +19,8 @@
     If set, perform PATCH even when hash matches (overrides SkipUnchanged for this run).
 .PARAMETER PruneStaleArticles
     After create/update, remove articles from the destination KB folder that are not in the current report set (stale). Lists articles under DestinationFolderPath, then archives those whose names are not in the current run's article list. Default: $false (opt-in).
+.PARAMETER BatchSize
+    Number of articles to send per API request when creating or updating KB articles. Limits request body size and reduces timeouts when articles are large. Default: 25. Valid range: 1-100.
 .PARAMETER WhatIf
     Common parameter (from SupportsShouldProcess). Lists what would be created, updated, or skipped without calling the API or writing the hash file. When -PruneStaleArticles is also set, lists which articles would be pruned (archived).
 .EXAMPLE
@@ -54,7 +56,10 @@ param (
     [Parameter()]
     [switch]$ForceUpdate = $false,
     [Parameter()]
-    [switch]$PruneStaleArticles = $false
+    [switch]$PruneStaleArticles = $false,
+    [Parameter()]
+    [ValidateRange(1, 100)]
+    [int]$BatchSize = 25
 )
 
 $ErrorActionPreference = 'Stop'
@@ -372,51 +377,103 @@ if ($errors.Count -gt 0) {
 $created = 0
 $updated = 0
 
-foreach ($item in $toCreate) {
-    try {
-        $body = [PSCustomObject]@{
-            name                    = $item.ArticleName
-            destinationFolderPath   = Get-NinjaOneFolderPath -Path $item.ArticleDestinationPath
-            content                 = @{ html = [string]$item.HtmlContent }
+# --- Bulk create: build array of create bodies, then send in batches ---
+if ($toCreate.Count -gt 0) {
+    $createBodies = @($toCreate | ForEach-Object {
+        [PSCustomObject]@{
+            name                    = $_.ArticleName
+            destinationFolderPath   = Get-NinjaOneFolderPath -Path $_.ArticleDestinationPath
+            content                 = @{ html = [string]$_.HtmlContent }
         }
-        $resp = Invoke-NinjaOneRequest -Path 'knowledgebase/articles' -Method POST -InputObject @($body) -AsArray
-        if ($resp) {
-            $created++
-            Write-Host "Created: $($item.ArticleName)"
+    })
+    for ($i = 0; $i -lt $createBodies.Count; $i += $BatchSize) {
+        $batchEnd = [Math]::Min($i + $BatchSize - 1, $createBodies.Count - 1)
+        $batch = @($createBodies[$i..$batchEnd])
+        $bulkOk = $false
+        try {
+            $resp = Invoke-NinjaOneRequest -Path 'knowledgebase/articles' -Method POST -InputObject $batch -AsArray
+            if ($resp) {
+                $created += @($resp).Count
+                $bulkOk = $true
+            }
+        } catch {
+            Write-Warning "Bulk create failed for batch $($i + 1)..$($batchEnd + 1): $($_.Exception.Message). Retrying individually."
         }
-    } catch {
-        $errMsg = $_.Exception.Message
-        if ($errMsg -match 'exceeds the maximum length|String length') {
-            Write-Warning "Skipped create for '$($item.ArticleName)': content over size limit. $errMsg"
-        } else {
-            Write-Error "Failed to create '$($item.ArticleName)': $_"
-            throw
+        if (-not $bulkOk) {
+            for ($j = $i; $j -le $batchEnd; $j++) {
+                $item = $toCreate[$j]
+                $single = @($createBodies[$j])
+                try {
+                    $resp = Invoke-NinjaOneRequest -Path 'knowledgebase/articles' -Method POST -InputObject $single -AsArray
+                    if ($resp) {
+                        $created++
+                        Write-Host "Created: $($item.ArticleName)"
+                    }
+                } catch {
+                    $errMsg = $_.Exception.Message
+                    if ($errMsg -match 'exceeds the maximum length|String length') {
+                        Write-Warning "Skipped create for '$($item.ArticleName)': content over size limit. $errMsg"
+                    } else {
+                        Write-Error "Failed to create '$($item.ArticleName)': $_"
+                        throw
+                    }
+                }
+            }
         }
+    }
+    if ($created -gt 0) {
+        Write-Host "Created: $created article(s)."
     }
 }
 
-foreach ($item in $toUpdate) {
-    try {
+# --- Bulk update: build array of update bodies, then send in batches ---
+if ($toUpdate.Count -gt 0) {
+    $updateBodies = @($toUpdate | ForEach-Object {
         $body = [PSCustomObject]@{
-            id                     = $item.ExistingId
-            name                   = $item.ArticleName
-            destinationFolderPath  = Get-NinjaOneFolderPath -Path $item.ArticleDestinationPath
-            content                = @{ html = [string]$item.HtmlContent }
+            id                     = $_.ExistingId
+            name                   = $_.ArticleName
+            destinationFolderPath  = Get-NinjaOneFolderPath -Path $_.ArticleDestinationPath
+            content                = @{ html = [string]$_.HtmlContent }
         }
-        if ($item.ExistingArchived) { $body | Add-Member -NotePropertyName 'archived' -NotePropertyValue $false -Force }
-        $resp = Invoke-NinjaOneRequest -Path 'knowledgebase/articles' -Method PATCH -InputObject @($body) -AsArray
-        if ($resp) {
-            $updated++
-            #Write-Host "Updated: $($item.ArticleName)"
+        if ($_.ExistingArchived) { $body | Add-Member -NotePropertyName 'archived' -NotePropertyValue $false -Force }
+        $body
+    })
+    for ($i = 0; $i -lt $updateBodies.Count; $i += $BatchSize) {
+        $batchEnd = [Math]::Min($i + $BatchSize - 1, $updateBodies.Count - 1)
+        $batch = @($updateBodies[$i..$batchEnd])
+        $bulkOk = $false
+        try {
+            $resp = Invoke-NinjaOneRequest -Path 'knowledgebase/articles' -Method PATCH -InputObject $batch -AsArray
+            if ($resp) {
+                $updated += @($resp).Count
+                $bulkOk = $true
+            }
+        } catch {
+            Write-Warning "Bulk update failed for batch $($i + 1)..$($batchEnd + 1): $($_.Exception.Message). Retrying individually."
         }
-    } catch {
-        $errMsg = $_.Exception.Message
-        if ($errMsg -match 'exceeds the maximum length|String length') {
-            Write-Warning "Skipped update for '$($item.ArticleName)': content over size limit. $errMsg"
-        } else {
-            Write-Error "Failed to update '$($item.ArticleName)': $_"
-            throw
+        if (-not $bulkOk) {
+            for ($j = $i; $j -le $batchEnd; $j++) {
+                $item = $toUpdate[$j]
+                $single = @($updateBodies[$j])
+                try {
+                    $resp = Invoke-NinjaOneRequest -Path 'knowledgebase/articles' -Method PATCH -InputObject $single -AsArray
+                    if ($resp) {
+                        $updated++
+                    }
+                } catch {
+                    $errMsg = $_.Exception.Message
+                    if ($errMsg -match 'exceeds the maximum length|String length') {
+                        Write-Warning "Skipped update for '$($item.ArticleName)': content over size limit. $errMsg"
+                    } else {
+                        Write-Error "Failed to update '$($item.ArticleName)': $_"
+                        throw
+                    }
+                }
+            }
         }
+    }
+    if ($updated -gt 0) {
+        Write-Host "Updated: $updated article(s)."
     }
 }
 
@@ -429,17 +486,35 @@ $pruned = 0
 if ($PruneStaleArticles) {
     $allInFolder = Get-KBArticlesUnderFolder -DestinationFolderPathFilter $destRoot
     $toPrune = @($allInFolder | Where-Object { -not $_.Archived -and -not $expectedArticleNames.ContainsKey($_.Name) })
-    foreach ($article in $toPrune) {
-        try {
-            $body = [PSCustomObject]@{
-                id       = $article.Id
-                archived = $true
+    if ($toPrune.Count -gt 0) {
+        $pruneBodies = @($toPrune | ForEach-Object { [PSCustomObject]@{ id = $_.Id; archived = $true } })
+        for ($i = 0; $i -lt $pruneBodies.Count; $i += $BatchSize) {
+            $batchEnd = [Math]::Min($i + $BatchSize - 1, $pruneBodies.Count - 1)
+            $batch = @($pruneBodies[$i..$batchEnd])
+            $bulkOk = $false
+            try {
+                Invoke-NinjaOneRequest -Path 'knowledgebase/articles' -Method PATCH -InputObject $batch -AsArray | Out-Null
+                for ($j = $i; $j -le $batchEnd; $j++) {
+                    $pruned++
+                    Write-Host "Pruned (archived): $($toPrune[$j].Name)"
+                }
+                $bulkOk = $true
+            } catch {
+                Write-Warning "Bulk prune failed for batch: $($_.Exception.Message). Retrying individually."
             }
-            Invoke-NinjaOneRequest -Path 'knowledgebase/articles' -Method PATCH -InputObject @($body) -AsArray | Out-Null
-            $pruned++
-            Write-Host "Pruned (archived): $($article.Name)"
-        } catch {
-            Write-Warning "Failed to archive stale article '$($article.Name)' (id=$($article.Id)): $_"
+            if (-not $bulkOk) {
+                for ($j = $i; $j -le $batchEnd; $j++) {
+                    $article = $toPrune[$j]
+                    $single = @($pruneBodies[$j])
+                    try {
+                        Invoke-NinjaOneRequest -Path 'knowledgebase/articles' -Method PATCH -InputObject $single -AsArray | Out-Null
+                        $pruned++
+                        Write-Host "Pruned (archived): $($article.Name)"
+                    } catch {
+                        Write-Warning "Failed to archive stale article '$($article.Name)' (id=$($article.Id)): $_"
+                    }
+                }
+            }
         }
     }
 }

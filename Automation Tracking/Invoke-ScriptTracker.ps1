@@ -302,6 +302,11 @@ if (-not (Test-Path $outputFolder)) {
             $deviceName = "<a href='$baseUrl/#/deviceDashboard/$deviceId/overview' target='_blank' style='color: #0066cc; text-decoration: none; font-weight: 500;' title='Open device dashboard'>$deviceName</a>"
         }
         $displayTime = Convert-ActivityTimeToLocalString -TimeValue $r.activityTime
+        $num = $null
+        $epochSec = 0L
+        if ($null -ne $r.activityTime -and [double]::TryParse([string]$r.activityTime, [ref]$num)) {
+            $epochSec = if ($num -ge 1000000000000) { [long][math]::Floor($num / 1000) } else { [long][math]::Floor($num) }
+        }
         [void]$automationDetails.Add([pscustomobject]@{
             DeviceName    = $deviceName
             SystemName    = $rawDeviceName
@@ -310,6 +315,7 @@ if (-not (Test-Path $outputFolder)) {
             message       = $r.message
             activityResult = $r.activityResult
             activityTime  = $displayTime
+            activityTimeEpochSeconds = $epochSec
             OrgName       = $r.OrgName
         })
     }
@@ -326,6 +332,11 @@ if (-not (Test-Path $outputFolder)) {
             $deviceName = "<a href='$baseUrl/#/deviceDashboard/$deviceId/overview' target='_blank' style='color: #0066cc; text-decoration: none; font-weight: 500;' title='Open device dashboard'>$deviceName</a>"
         }
         $displayTime = Convert-ActivityTimeToLocalString -TimeValue $r.activityTime
+        $num = $null
+        $epochSec = 0L
+        if ($null -ne $r.activityTime -and [double]::TryParse([string]$r.activityTime, [ref]$num)) {
+            $epochSec = if ($num -ge 1000000000000) { [long][math]::Floor($num / 1000) } else { [long][math]::Floor($num) }
+        }
         [void]$automationDetailsLatest.Add([pscustomobject]@{
             DeviceName    = $deviceName
             SystemName    = $rawDeviceName
@@ -334,6 +345,7 @@ if (-not (Test-Path $outputFolder)) {
             message       = $r.message
             activityResult = $r.activityResult
             activityTime  = $displayTime
+            activityTimeEpochSeconds = $epochSec
             OrgName       = $r.OrgName
         })
     }
@@ -363,7 +375,21 @@ if (-not (Test-Path $outputFolder)) {
     $globalSummaryHtml += "</div>"
     $introParagraph = "<p style='margin: 0 0 16px 0; color: #666; font-size: 0.9rem;'>Cards show success/failure at a glance; green top border = mostly success, red = mostly failures.</p>"
     $cardHtmls = [System.Collections.Generic.List[string]]::new()
+    $automationSummaries = [System.Collections.Generic.List[pscustomobject]]::new()
     foreach ($group in $automations) {
+        $success_count = @($group.Group | Where-Object { ([string]$_.activityResult).Trim() -ieq 'SUCCESS' }).Count
+        $total = $group.Group.Count
+        $success_percentage = if ($total -gt 0) { [math]::Round(($success_count / $total * 100), 2) } else { 0 }
+        $maxEpoch = 0L
+        foreach ($row in $group.Group) {
+            $e = [long]$row.activityTimeEpochSeconds
+            if ($e -gt $maxEpoch) { $maxEpoch = $e }
+        }
+        [void]$automationSummaries.Add([pscustomobject]@{ Group = $group; SuccessPercentage = $success_percentage; MaxActivityEpoch = $maxEpoch })
+    }
+    $sortedSummaries = $automationSummaries | Sort-Object -Property SuccessPercentage, @{ Expression = { 0 - [long]$_.MaxActivityEpoch }; Ascending = $true }
+    foreach ($summary in $sortedSummaries) {
+        $group = $summary.Group
         $automationName = [string]$group.Name
         $safeName = Get-SafePathSegment -Value $automationName -Placeholder 'UnnamedAutomation' -MaxLength 100
         $success_count = @($group.Group | Where-Object { ([string]$_.activityResult).Trim() -ieq 'SUCCESS' }).Count
@@ -422,6 +448,25 @@ if (-not (Test-Path $outputFolder)) {
         Get-ChildItem -LiteralPath $orgFolder -Directory -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
     }
 
+    # --- Load failure clusters (from Invoke-FailureClustering.ps1) when present ---
+    $failureClustersByAutomation = @{}
+    $failureClustersPath = Join-Path $outputFolder "failure-clusters.json"
+    if (Test-Path -LiteralPath $failureClustersPath -PathType Leaf) {
+        try {
+            $fcJson = Get-Content -LiteralPath $failureClustersPath -Raw -Encoding UTF8
+            if (-not [string]::IsNullOrWhiteSpace($fcJson)) {
+                $fcParsed = $fcJson | ConvertFrom-Json
+                if ($fcParsed -and $fcParsed.byAutomation) {
+                    $fcParsed.byAutomation.PSObject.Properties | ForEach-Object {
+                        $failureClustersByAutomation[$_.Name] = $_.Value
+                    }
+                }
+            }
+        } catch {
+            Write-Warning "Could not load failure-clusters.json: $_. Failure groupings will be omitted."
+        }
+    }
+
     # --- Per-automation detail pages (all automations) ---
     foreach ($group in $automations) {
         $automationName = [string]$group.Name
@@ -443,11 +488,46 @@ if (-not (Test-Path $outputFolder)) {
         $content += "<span><span style='display: inline-block; width: 10px; height: 10px; margin-right: 4px; background-color: #22c55e; vertical-align: middle;'></span>Success ($success_count)</span>"
         $content += "<span><span style='display: inline-block; width: 10px; height: 10px; margin-right: 4px; background-color: #ef4444; vertical-align: middle;'></span>Failure ($failure_count)</span>"
         $content += "</div></div>"
+        # --- Failure message groupings (from Invoke-FailureClustering.ps1) when present ---
+        $clustersForAutomation = $failureClustersByAutomation[$automationName]
+        if ($clustersForAutomation -and @($clustersForAutomation).Count -gt 0) {
+            $content += "<div style='margin: 15px 0 20px 0; padding: 12px 15px; border: 1px solid #fecaca; border-radius: 8px; background: #fef2f2;'>"
+            $content += "<h3 style='margin: 0 0 10px 0; font-size: 1rem; color: #991b1b;'>Common failure message groupings</h3>"
+            $content += "<p style='margin: 0 0 12px 0; font-size: 0.85rem; color: #7f1d1d;'>Clustered by similarity (TF-IDF + KMeans).</p>"
+            $clusterIndex = 0
+            foreach ($cluster in @($clustersForAutomation)) {
+                $clusterIndex++
+                $cCount = if ($cluster.count) { [int]$cluster.count } else { 0 }
+                $cLabel = if ($cluster.label) { [System.Net.WebUtility]::HtmlEncode([string]$cluster.label) } else { $null }
+                $cDevices = if ($cluster.affectedDeviceCount -ne $null) { [int]$cluster.affectedDeviceCount } else { $null }
+                $cSample = if ($cluster.sampleMessage) { [System.Net.WebUtility]::HtmlEncode([string]$cluster.sampleMessage) } else { '' }
+                if ($cSample.Length -gt 400) { $cSample = $cSample.Substring(0, 400) + "..." }
+                $content += "<div style='margin-bottom: 10px; padding: 10px; border-left: 3px solid #ef4444; background: #fff; border-radius: 4px;'>"
+                $headerText = "Group $clusterIndex &mdash; $cCount occurrence$(if ($cCount -ne 1) { 's' })"
+                if ($cDevices -ge 0) { $headerText += " ($cDevices device$(if ($cDevices -ne 1) { 's' }))" }
+                $content += "<div style='font-size: 0.85rem; font-weight: 600; color: #b91c1c; margin-bottom: 4px;'>$headerText</div>"
+                if ($cLabel) { $content += "<div style='font-size: 0.8rem; color: #6b7280; margin-bottom: 4px;'>$cLabel</div>" }
+                $content += "<div style='font-size: 0.85rem; color: #374151; white-space: pre-wrap; word-break: break-word;'>$cSample</div>"
+                $topMsgs = $cluster.topMessages
+                if ($topMsgs -and @($topMsgs).Count -gt 0) {
+                    $content += "<ul style='margin: 6px 0 0 0; padding-left: 20px; font-size: 0.8rem; color: #6b7280;'>"
+                    foreach ($tm in @($topMsgs) | Select-Object -First 5) {
+                        $tmEnc = [System.Net.WebUtility]::HtmlEncode([string]$tm)
+                        if ($tmEnc.Length -gt 200) { $tmEnc = $tmEnc.Substring(0, 200) + "..." }
+                        $content += "<li>$tmEnc</li>"
+                    }
+                    $content += "</ul>"
+                }
+                $content += "</div>"
+            }
+            $content += "</div>"
+        }
         $content += "<div style='overflow-x: auto;'><table style='width: 100%; border-collapse: collapse; font-size: 0.9rem;'>"
         $content += "<thead><tr style='background: #667eea; color: white;'><th style='padding: 8px; text-align: left;'>DeviceName</th><th style='padding: 8px; text-align: left;'>sourceName</th><th style='padding: 8px; text-align: left;'>message</th><th style='padding: 8px; text-align: left;'>activityResult</th><th style='padding: 8px; text-align: left;'>activityTime</th><th style='padding: 8px; text-align: left;'>OrgName</th></tr></thead><tbody>"
         $totalRows = $group.Group.Count
+        $rowsForTable = $group.Group | Sort-Object { if (([string]$_.activityResult).Trim() -ieq 'FAILURE') { 0 } else { 1 } }
         $rowsAdded = 0
-        foreach ($r in $group.Group) {
+        foreach ($r in $rowsForTable) {
             if ($rowsAdded -ge $MaxDetailRows) { break }
             if ($MaxDetailHtmlChars -gt 0 -and $content.Length -ge $MaxDetailHtmlChars) { break }
             $ar = ([string]$r.activityResult).Trim()
@@ -478,7 +558,7 @@ if (-not (Test-Path $outputFolder)) {
         $content += "<thead><tr style='background: #667eea; color: white;'><th style='padding: 8px; text-align: left;'>DeviceName</th><th style='padding: 8px; text-align: left;'>sourceName</th><th style='padding: 8px; text-align: left;'>activityResult</th><th style='padding: 8px; text-align: left;'>activityTime</th><th style='padding: 8px; text-align: left;'>OrgName</th></tr></thead><tbody>"
         $totalRows = $group.Group.Count
         $rowsAdded = 0
-        foreach ($r in $group.Group) {
+        foreach ($r in ($group.Group | Sort-Object -Property activityTimeEpochSeconds -Descending)) {
             if ($rowsAdded -ge $MaxDetailRows) { break }
             if ($MaxDetailHtmlChars -gt 0 -and $content.Length -ge $MaxDetailHtmlChars) { break }
             $ar = ([string]$r.activityResult).Trim()
