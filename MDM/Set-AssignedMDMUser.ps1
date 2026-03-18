@@ -3,6 +3,13 @@ $ErrorActionPreference = 'Stop'
 
 $email = $null
 
+# Stagger `dsregcmd /status` calls across machines to avoid endpoint hammering.
+# Max delay is intentionally conservative; enable with `-Verbose` for troubleshooting.
+$MaxDelaySeconds = 180
+$DelaySeconds = Get-Random -Minimum 0 -Maximum ($MaxDelaySeconds + 1)
+Write-Verbose "dsregcmd delay: sleeping $DelaySeconds second(s) before /status"
+Start-Sleep -Seconds $DelaySeconds
+
 $dsregOut = dsregcmd /status 2>$null
 if ($dsregOut) {
     $labels = @('User Identity', 'UserEmail', 'MDMUserUPN', 'MDM User UPN')
