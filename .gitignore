@@ -22,3 +22,10 @@ AEUserQRCodes/
 AEDeviceQRCodes/
 DeviceQRCodes/
 UserQRCodes/
+Vulnerability Import/Tenable/Upload-CSVtoNinja.ps1
+HomeLab/Create-EntraVMfromCSV.ps1
+HomeLab/Create-VMFromCSV.ps1
+HomeLab/README.md
+Kiosk Mode/Setup Kiosk Mode - MS Edge.ps1
+HomeLab/VMcreation-example.csv
+Tree Size/Set-NinjaTreesize.ps1
