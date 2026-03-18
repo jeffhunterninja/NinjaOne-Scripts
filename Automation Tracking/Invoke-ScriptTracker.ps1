@@ -25,7 +25,7 @@
 .PARAMETER KbArticleIdMapPath
     Path to the KB article ID mapping file (.kb-article-ids.json). When present, links to other report articles (e.g. Automation Detail pages) are emitted as NinjaOne deep links. Default: BaseOutputFolder\.kb-article-ids.json. Generate or refresh the file with Update-ScriptTrackerKbArticleMap.ps1.
 .PARAMETER KbLinkBaseUrl
-    Base URL or host for all report links: KB article links and device dashboard links (e.g. rcs-sales.rmmservice.ca or https://rcs-sales.rmmservice.ca). When empty, links use the same instance as NinjaOneInstance. Optional: set via env NINJAONE_KB_LINK_BASE_URL or this parameter. Use for branded/partner portals so links open on the correct site. Parameter takes precedence when non-empty.
+    Base URL or host for all report links: KB article links and device dashboard links (e.g. rcs-sales.rmmservice.ca or https://rcs-sales.rmmservice.ca). When empty (default), links use the same instance as NinjaOneInstance. Optional: set via env NINJAONE_KB_LINK_BASE_URL or this parameter. Use for branded/partner portals so links open on the correct site. Parameter takes precedence when non-empty.
 .PARAMETER MaxDetailRows
     Maximum number of table rows to emit in each automation or device detail page. When exceeded, only the first N rows are shown and a truncation message is appended. Helps keep HTML under NinjaOne KB article size limits. Default: 5000.
 .PARAMETER MaxDetailHtmlChars
@@ -53,7 +53,7 @@ param (
     [Parameter()]
     [string]$KbArticleIdMapPath = 'c:\RMM\Reports\Script Tracking\.kb-article-ids.json',
     [Parameter()]
-    [string]$KbLinkBaseUrl = 'mspdemo.rmmservice.ca',
+    [string]$KbLinkBaseUrl = '',
     [Parameter()]
     [int]$MaxDetailRows = 5000,
     [Parameter()]

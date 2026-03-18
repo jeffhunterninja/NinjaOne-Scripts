@@ -214,7 +214,8 @@ function Enrich-And-Insert {
     $countAfter = [int](Invoke-SqliteScalar -SqliteExe $sqliteExePath -DataSource $db -Sql "SELECT COUNT(*) FROM Activities;")
     $ins = $countAfter - $countBefore
     $skip = $attempted - $ins
-    ,@($ins, $skip)
+    # Return a flat 2-element array so callers can use $res[0] and $res[1].
+    @($ins, $skip)
 }
 
 # Fetch by date range: API uses after, before (epoch seconds), and olderThan for pagination
