@@ -1,0 +1,8 @@
+level,name,maintenanceRecurrence,maintenanceDay,maintenanceOccurrence,maintenanceStart,maintenanceEnd
+organization,Herrera Technologies,Daily,,,11:00,18:00
+organization,KMSP Radio Station,Weekly,Wednesday,,11:00,18:00
+organization,Murillo Ventures,Weekly,Wednesday,,11:00,19:00
+organization,Bill's Maple Leaf Diner,Monthly,Wednesday,1,11:00,14:00
+organization,Steve's Snowboard Rentals (CIPP),Weekly,Wednesday,,11:00,17:00
+organization,Law offices of Delassen-Wills,Monthly,Wednesday,1,11:00,17:00
+

@@ -1,0 +1,7 @@
+DeviceType,Name,RoleName,OrganizationName,LocationName,Make,Model,SerialNumber,PurchaseDate,PurchaseAmount,WarrantyStartDate,WarrantyEndDate,AssetStatus,ExpectedLifetime,EndOfLifeDate
+Unmanaged,"Dell Dock","Dock","Globex Corporation","Training Center","Dell","WD19","TL-001","2024-01-15",1250.00,"2024-01-15","2027-01-15","Inventory","5 years","2029-01-15"
+Staged,"Laptop-Jane","Windows Workstation","Globex Corporation","Training Center","Dell","Latitude 5540","LAP-001","2024-06-01",1200.00,"2024-06-01","2027-06-01","Staged","4 years","2028-06-01"
+Unmanaged,"Dell Display 1","Monitor","Globex Corporation","Training Center","Dell","P2722H","TS-001","2023-09-01",800.00,"2023-09-01","2026-09-01","Inventory","5 years","2028-09-01"
+Unmanaged,"Dell Display 2","Monitor","Globex Corporation","Training Center","Dell","P2722H","TS-002","2023-09-01",800.00,"2023-09-01","2026-09-01","Inventory","5 years","2028-09-01"
+Unmanaged,"Dell Keyboard","Keyboard","Globex Corporation","Training Center","Dell","KB522","KB-001","2024-01-15",45.00,"2024-01-15","2025-01-15","Inventory","3 years","2027-01-15"
+Unmanaged,"Jabra Headset","Headset","Globex Corporation","Training Center","Jabra","Evolve2 40","HS-001","2024-02-01",250.00,"2024-02-01","2025-02-01","Inventory","2 years","2027-02-01"

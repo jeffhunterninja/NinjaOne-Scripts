@@ -247,6 +247,16 @@ function Get-NextOccurrenceUnixMs {
     return [long]([DateTimeOffset]::new($target).ToUnixTimeMilliseconds())
 }
 
+function Get-NormalizedMonthlyOccurrence {
+    param([string]$Occurrence)
+    if ([string]::IsNullOrWhiteSpace($Occurrence)) { return $null }
+    $s = $Occurrence.Trim().ToLowerInvariant()
+    if ($s -eq 'last') { return 'Last' }
+    $n = 0
+    if ([int]::TryParse($s, [ref]$n) -and $n -ge 1 -and $n -le 4) { return [string]$n }
+    return $null
+}
+
 function Get-CustomFieldsFromRow {
     param([PSCustomObject]$Row, [bool]$OverwriteEmpty)
     $customFields = @{}
@@ -259,16 +269,30 @@ function Get-CustomFieldsFromRow {
             $customFields[$prop.Name] = $val
         }
     }
-    # Convert maintenanceStart and maintenanceEnd to Unix time (ms) using maintenanceDay from the same row
-    $maintenanceDay = ($Row.PSObject.Properties | Where-Object { $_.Name -eq 'maintenanceDay' } | Select-Object -ExpandProperty Value) -as [string]
-    if (-not [string]::IsNullOrWhiteSpace($maintenanceDay)) {
-        if ($customFields.ContainsKey('maintenanceStart') -and $null -ne $customFields['maintenanceStart'] -and $customFields['maintenanceStart'] -notmatch '^\d+$') {
-            $ms = Get-NextOccurrenceUnixMs -DayName $maintenanceDay -TimeString ($customFields['maintenanceStart'] -as [string])
-            if ($null -ne $ms) { $customFields['maintenanceStart'] = $ms }
-        }
-        if ($customFields.ContainsKey('maintenanceEnd') -and $null -ne $customFields['maintenanceEnd'] -and $customFields['maintenanceEnd'] -notmatch '^\d+$') {
-            $ms = Get-NextOccurrenceUnixMs -DayName $maintenanceDay -TimeString ($customFields['maintenanceEnd'] -as [string])
-            if ($null -ne $ms) { $customFields['maintenanceEnd'] = $ms }
+    # Recurrence: Daily | Weekly | Monthly (default Weekly when missing)
+    $maintenanceRecurrence = ($Row.PSObject.Properties | Where-Object { $_.Name -eq 'maintenanceRecurrence' } | Select-Object -ExpandProperty Value) -as [string]
+    if ([string]::IsNullOrWhiteSpace($maintenanceRecurrence)) { $maintenanceRecurrence = 'Weekly' }
+    else {
+        $maintenanceRecurrence = $maintenanceRecurrence.Trim().ToLowerInvariant()
+        if ($maintenanceRecurrence -eq 'daily') { $maintenanceRecurrence = 'Daily' }
+        elseif ($maintenanceRecurrence -eq 'weekly') { $maintenanceRecurrence = 'Weekly' }
+        elseif ($maintenanceRecurrence -eq 'monthly') { $maintenanceRecurrence = 'Monthly' }
+        else { $maintenanceRecurrence = 'Weekly' }
+    }
+    $customFields['maintenanceRecurrence'] = $maintenanceRecurrence
+
+    # Convert maintenanceStart and maintenanceEnd to Unix time (ms) only for Weekly, using maintenanceDay
+    if ($maintenanceRecurrence -eq 'Weekly') {
+        $maintenanceDay = ($Row.PSObject.Properties | Where-Object { $_.Name -eq 'maintenanceDay' } | Select-Object -ExpandProperty Value) -as [string]
+        if (-not [string]::IsNullOrWhiteSpace($maintenanceDay)) {
+            if ($customFields.ContainsKey('maintenanceStart') -and $null -ne $customFields['maintenanceStart'] -and $customFields['maintenanceStart'] -notmatch '^\d+$') {
+                $ms = Get-NextOccurrenceUnixMs -DayName $maintenanceDay -TimeString ($customFields['maintenanceStart'] -as [string])
+                if ($null -ne $ms) { $customFields['maintenanceStart'] = $ms }
+            }
+            if ($customFields.ContainsKey('maintenanceEnd') -and $null -ne $customFields['maintenanceEnd'] -and $customFields['maintenanceEnd'] -notmatch '^\d+$') {
+                $ms = Get-NextOccurrenceUnixMs -DayName $maintenanceDay -TimeString ($customFields['maintenanceEnd'] -as [string])
+                if ($null -ne $ms) { $customFields['maintenanceEnd'] = $ms }
+            }
         }
     }
     return $customFields
@@ -315,6 +339,19 @@ foreach ($row in $rows) {
         Write-Warning "Skipping row (level=$level, name=$name): no custom field columns."
         $script:SkippedCount++
         continue
+    }
+
+    # Validate Monthly: require valid maintenanceOccurrence (1, 2, 3, 4, or Last)
+    $recurrence = ($customFields['maintenanceRecurrence'] -as [string]).Trim().ToLowerInvariant()
+    if ($recurrence -eq 'monthly') {
+        $occRaw = ($customFields['maintenanceOccurrence'] -as [string])
+        $occNormalized = Get-NormalizedMonthlyOccurrence -Occurrence $occRaw
+        if ($null -eq $occNormalized) {
+            Write-Warning "Skipping row (level=$level, name=$name): maintenanceRecurrence is Monthly but maintenanceOccurrence is missing or invalid. Use 1, 2, 3, 4, or Last."
+            $script:SkippedCount++
+            continue
+        }
+        $customFields['maintenanceOccurrence'] = $occNormalized
     }
 
     if ($level -notin 'organization', 'location', 'device') {

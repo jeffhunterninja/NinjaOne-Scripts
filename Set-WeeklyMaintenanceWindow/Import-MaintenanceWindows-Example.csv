@@ -1,5 +1,6 @@
-level,name,maintenanceStart,maintenanceEnd,maintenanceDay
-organization,Internal Infrastructure,02:00,04:00,Sunday
-location,"Internal Infrastructure,Main Office",01:00,03:00,Saturday
-device,DemoVM01,00:00,02:00,Tuesday
-
+level,name,maintenanceRecurrence,maintenanceDay,maintenanceOccurrence,maintenanceStart,maintenanceEnd
+organization,Nightly Batch,Daily,,,02:00,04:00
+organization,Internal Infrastructure,Weekly,Sunday,,02:00,04:00
+location,"Internal Infrastructure,Main Office",Weekly,Saturday,,01:00,03:00
+organization,Patch Tuesday,Monthly,Tuesday,2,22:00,06:00
+device,DemoVM01,Weekly,Tuesday,,00:00,02:00

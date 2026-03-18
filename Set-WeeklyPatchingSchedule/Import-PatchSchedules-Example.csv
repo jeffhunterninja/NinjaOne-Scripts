@@ -1,4 +1,6 @@
-level,name,patchingDay,patchingStart
-organization,Internal Infrastructure,Sunday,02:00
-location,"Internal Infrastructure,Main Office",Saturday,01:00
-device,DemoVM01,Tuesday,00:00
+level,name,patchingRecurrence,patchingDay,patchingOccurrence,patchingStart
+organization,Internal Infrastructure,Weekly,Sunday,,02:00
+location,"Internal Infrastructure,Main Office",Weekly,Saturday,,01:00
+organization,Nightly Patchers,Daily,,,03:00
+organization,Patch Tuesday,Monthly,Tuesday,2,22:00
+device,DemoVM01,Weekly,Tuesday,,00:00

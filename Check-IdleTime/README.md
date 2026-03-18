@@ -17,10 +17,12 @@ It works by launching a lightweight PowerShell helper **inside each logged-in us
 
 ### ⚙️ Exit Codes
 
+Meaning of 0 and 1 depends on the **Alert On** setting (parameter or script variable):
+
 | Code | Meaning |
 |------|----------|
-| `0`  | OK — no threshold set or idle below threshold |
-| `1`  | ALERT — idle time ≥ threshold |
+| `0`  | OK — With "Idle Time Greater": no threshold or idle &lt; threshold. With "Idle Time Lesser": no threshold or idle ≥ threshold. |
+| `1`  | ALERT — With "Idle Time Greater": idle ≥ threshold. With "Idle Time Lesser": idle &lt; threshold. |
 | `2`  | Not elevated (must run as SYSTEM) |
 
 ---
@@ -65,21 +67,20 @@ Three custom fields are updated:
 
 ### 5. Threshold Handling
 
-If a threshold is defined (`ThresholdMinutes` or `thresholdminutes` env var):
+If a threshold is defined (`ThresholdMinutes` or `thresholdminutes` env var), behavior depends on **Alert On**:
 
-- When idle time ≥ threshold:  
-  → Writes an alert to `idleTimeStatus` and exits with code **1**
-- Otherwise:  
-  → Writes numeric idle time and exits **0**
+- **Idle Time Greater** (default): When idle ≥ threshold → alert in `idleTimeStatus`, exit **1**. Otherwise → exit **0**.
+- **Idle Time Lesser**: When idle &lt; threshold → alert in `idleTimeStatus`, exit **1**. When idle ≥ threshold → exit **0**.
 
 ---
 
 ##  Parameters and Environment Variables
 
 - **UserName** (parameter, optional): When set, only sessions for users matching this name (via `query user`) are measured. If `query user` fails or returns no data (e.g. non-English Windows), the user filter is skipped and **all** sessions are measured.
-- **ThresholdMinutes** (parameter, default `0`): Idle threshold in minutes; exit code 1 when idle ≥ this value. Must be ≥ 0.
+- **ThresholdMinutes** (parameter, default `0`): Idle threshold in minutes. With default Alert On "Idle Time Greater", exit code 1 when idle ≥ this value. Must be ≥ 0.
 - **PerProcessTimeoutSeconds** (parameter, default `10`): Timeout in seconds for the helper run in each session. Valid range 1–300.
-- **NinjaOne:** Create a Script Form Variable called "Threshold Minutes" (integer) to set the threshold; the script reads `$env:thresholdminutes` and uses it only when present and a valid non-negative integer. Otherwise the parameter default (or value passed to the script) is used.
+- **AlertOn** (parameter, default `Idle Time Greater`): When to alert (exit 1). `Idle Time Greater` = alert when idle ≥ threshold. `Idle Time Lesser` = alert when idle &lt; threshold.
+- **NinjaOne:** Create a script variable "Threshold Minutes" (integer) to set the threshold; the script reads `$env:thresholdminutes` when present and valid. Optionally create "Alert On" (text); the script reads `$env:alerton` and accepts `Idle Time Greater` or `Idle Time Lesser` (case-insensitive). Parameter defaults are used when env vars are missing or invalid.
 
 ---
 
@@ -105,8 +106,9 @@ Create three custom fields in NinjaOne under **Devices → Custom Fields**:
 
 ### 3. Configure Thresholds
 
-#### Create script variable
-Set a script variable in the script called "Threshold Minutes" that uses the "Integer" data type.
+#### Create script variables
+- **Threshold Minutes** (Integer): Sets the idle threshold in minutes.
+- **Alert On** (optional, Text): Set to `Idle Time Greater` (alert when idle ≥ threshold) or `Idle Time Lesser` (alert when idle &lt; threshold). Default is "Idle Time Greater" if not set.
 
 ---
 
@@ -143,7 +145,7 @@ Custom Fields:
 idleTime: 1 hour, 25 minutes
 idleTimeStatus: ALERT: Idle 85 min (>= 60)
 idleTimeMinutes: 85
-Exit Code: 2
+Exit Code: 1
 ```
 
 ---
@@ -152,7 +154,7 @@ Exit Code: 2
 
 | Issue | Likely Cause | Solution |
 |--------|--------------|-----------|
-| `Access Denied` / Exit Code 1 | Script not elevated | Run as **SYSTEM** |
+| `Access Denied` / Exit Code 2 | Script not elevated | Run as **SYSTEM** |
 | `(No sessions measured or all failed)` | No interactive users or helper timed out | Confirm a user is logged in; increase `PerProcessTimeoutSeconds` if sessions are slow |
 | Idle time incorrect | Different session evaluated | Check per-session table; run with `-Verbose` to see which session was evaluated |
 | Threshold ignored | Env not set or invalid | Set NinjaOne script variable "Threshold Minutes" (integer); param default is used when env is missing |
