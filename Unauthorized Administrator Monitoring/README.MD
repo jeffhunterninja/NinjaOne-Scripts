@@ -36,7 +36,7 @@ Allowed entries are case-insensitive. You can use either `DOMAIN\user` or `user`
 | **Report Local Admins** (Template Library) | Enumerates local admins and updates the **Local Admins** custom field. Schedule this with Test-UnauthorizedAdministrators. |
 | **Report-LocalAdmins.ps1** | Standalone report-only script that enumerates local admins and writes to `LocalAdmins` (optional in-repo alternative to the template). |
 | **Test-UnauthorizedAdministrators.ps1** | Compares local admins to the allowed list, writes `LocalAdmins` and `unauthorizedAdmins` / `unauthorizedLocalAdmins`. Run as a **script result condition** in NinjaOne (e.g. trigger automation when exit code is 1). |
-| **Create-NinjaAdminAccount.ps1** | Creates or updates a named local or domain admin account (parameters or `$env:adminusername` / `$env:adminpassword`). |
+| **Create-NinjaAdminAccount.ps1** | **Test/demo only.** Creates or updates a named local or domain admin (parameters or `$env:adminusername` / `$env:adminpassword`). By default registers a one-time task to **disable that account after 24 hours** (`-AutoDisableAfterHours`; use `0` to skip). Run on a DC for domain admins. |
 
 Set authorized administrators using org docs (User Management / Admins), org-level custom property `authorizedAdminsOrg`, and/or device-level custom field `authorizedAdmins`.
 
