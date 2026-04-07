@@ -24,6 +24,15 @@ param(
 # --- Configuration ---
 $CacheFolderDefault = 'C:\ProgramData\cache'
 $CustomFieldName = 'patchCacheHtml'
+$ConfigFile = 'C:\ProgramData\NinjaRMMAgent\components\cache-listener\config\listener_config.ini'
+
+$FolderPathLine = Select-String -Path $ConfigFile -Pattern '^\s*folder_path\s*=' | Select-Object -First 1
+
+if ($FolderPathLine) {
+    if ($FolderPathLine.Line -match 'folder_path\s*=\s*"(.+)"') {
+        $CacheFolderDefault = $matches[1] -replace '\\\\', '\'
+    }
+}
 
 #region ================================================================
 #  LOGGING
@@ -70,6 +79,27 @@ if (-not $cacheProc) {
 } else {
     $skipParse = $false
     Write-Log "CacheListener.exe running - PID: $($cacheProc.Id)" 'Info'
+    $RuleName = 'Allow Cache Listener Inbound 8443'
+    $ProgramPath = 'C:\ProgramData\NinjaRMMAgent\components\cache-listener\CacheListener.exe'
+    $Port = 8443
+    
+    $Rule = Get-NetFirewallRule -DisplayName $RuleName -ErrorAction SilentlyContinue
+    
+    if ($Rule) {
+        Write-Host "Firewall rule '$RuleName' already exists." -ForegroundColor Green
+    } else {
+        New-NetFirewallRule `
+            -DisplayName $RuleName `
+            -Direction Inbound `
+            -Action Allow `
+            -Enabled True `
+            -Profile Any `
+            -Protocol TCP `
+            -LocalPort $Port `
+            -Program $ProgramPath | Out-Null
+    
+        Write-Host "Firewall rule '$RuleName' created." -ForegroundColor Green
+    }
 }
 
 if (-not $skipParse) {
