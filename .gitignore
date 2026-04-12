@@ -9,6 +9,7 @@ NinjaOne-Scripts.code-workspace
 Set-CustomFieldMaintenanceWindow/config.json
 Set-CustomFieldMaintenanceWindow/NinjaOne-CustomFields-MaintenanceWindow.csv
 Set-CustomFieldPatchingSchedule/config.json
+Compound Conditions Webinar/config.json
 Set-CustomFieldPatchingSchedule/mspdemo.csv
 Set-CustomFieldPatchingSchedule/NinjaOne-CustomFields-PatchingSchedule.csv
 Unauthorized Administrator Monitoring/Report-LocalAdmins.ps1
