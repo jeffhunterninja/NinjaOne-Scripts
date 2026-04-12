@@ -1383,6 +1383,7 @@ $xaml = @"
               <ColumnDefinition Width="Auto"/>
               <ColumnDefinition Width="Auto"/>
               <ColumnDefinition Width="Auto"/>
+              <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
             <TextBox x:Name="tbQrDeviceId" Height="28"
                      VerticalContentAlignment="Center"
@@ -1391,7 +1392,11 @@ $xaml = @"
             <Button Grid.Column="2" x:Name="btnQrRefreshImport"
                     Content="From Import"
                     ToolTip="Load devices imported in the Import tab"/>
-            <Button Grid.Column="3" x:Name="btnQrRemoveDevice" Content="Remove"/>
+            <Button Grid.Column="3" x:Name="btnQrRemoveDevice" Content="Remove"
+                    ToolTip="Remove selected device(s) from the list."/>
+            <Button Grid.Column="4" x:Name="btnQrSelectAll" Content="Select all"
+                    Margin="8,0,0,0"
+                    ToolTip="Select every device in the list (for Remove or multi-select)."/>
           </Grid>
 
           <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,4">
@@ -1403,7 +1408,9 @@ $xaml = @"
                     ToolTip="Replace list with all devices except UNMANAGED_DEVICE node class."/>
           </StackPanel>
 
-          <ListBox Grid.Row="2" x:Name="lbQrDevices" Margin="0,0,0,8"/>
+          <ListBox Grid.Row="2" x:Name="lbQrDevices" Margin="0,0,0,8"
+                   SelectionMode="Extended"
+                   ToolTip="Ctrl+click or Shift+click to select multiple devices."/>
 
           <Grid Grid.Row="3" Margin="0,0,0,4">
             <Grid.ColumnDefinitions>
@@ -1708,6 +1715,7 @@ $tbQrDeviceId        = $window.FindName('tbQrDeviceId')
 $btnQrAddDevice      = $window.FindName('btnQrAddDevice')
 $btnQrRefreshImport  = $window.FindName('btnQrRefreshImport')
 $btnQrRemoveDevice   = $window.FindName('btnQrRemoveDevice')
+$btnQrSelectAll      = $window.FindName('btnQrSelectAll')
 $btnQrLoadAll        = $window.FindName('btnQrLoadAll')
 $btnQrLoadUnmanaged  = $window.FindName('btnQrLoadUnmanaged')
 $btnQrLoadManaged    = $window.FindName('btnQrLoadManaged')
@@ -3007,9 +3015,29 @@ $btnQrRefreshImport.Add_Click({
 })
 
 $btnQrRemoveDevice.Add_Click({
-    if ($lbQrDevices.SelectedIndex -ge 0) {
-        $lbQrDevices.Items.RemoveAt($lbQrDevices.SelectedIndex)
+    $selected = @($lbQrDevices.SelectedItems)
+    if ($selected.Count -eq 0) {
+        $lblStatus.Text = 'Select one or more devices in the list, then click Remove.'
+        [System.Media.SystemSounds]::Hand.Play()
+        return
     }
+    foreach ($item in $selected) {
+        [void]$lbQrDevices.Items.Remove($item)
+    }
+    $lblStatus.Text = "Removed $($selected.Count) device(s) from the QR generation list."
+})
+
+$btnQrSelectAll.Add_Click({
+    if ($lbQrDevices.Items.Count -eq 0) {
+        $lblStatus.Text = 'No devices in the list to select.'
+        [System.Media.SystemSounds]::Hand.Play()
+        return
+    }
+    $lbQrDevices.SelectedItems.Clear()
+    for ($i = 0; $i -lt $lbQrDevices.Items.Count; $i++) {
+        [void]$lbQrDevices.SelectedItems.Add($lbQrDevices.Items[$i])
+    }
+    $lblStatus.Text = "Selected all $($lbQrDevices.Items.Count) device(s) in the QR generation list."
 })
 
 $btnQrBrowseDir.Add_Click({
