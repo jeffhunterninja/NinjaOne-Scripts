@@ -2,16 +2,18 @@
 <#
 .SYNOPSIS
     NinjaOne ITAM Manager - unified WPF tool for equipment import, QR code
-    generation, QR upload, and device-to-user assignment.
+    generation, QR upload, physical asset label printing, and device-to-user assignment.
 
 .DESCRIPTION
-    Standalone PowerShell WPF application (no dot-sourcing) combining four
+    Standalone PowerShell WPF application (no dot-sourcing) combining five
     ITAM workflows:
 
         Tab 1 - Import Equipment:   Create unmanaged or staged devices from CSV or manual entry.
-        Tab 2 - Generate QR Codes:  Create device dashboard QR code images.
+        Tab 2 - Generate QR Codes:  Create ITAM asset search QR code images (itamAssetId from custom fields);
+                                    bulk-load all, unmanaged-only, or managed-only devices from inventory.
         Tab 3 - Upload QR Codes:    Attach QR PNGs to devices as related items.
-        Tab 4 - Scan & Assign:      Scan user/device QR codes to assign owners.
+        Tab 4 - Print Labels:       Print labels with ITAM asset ID and QR (same URL as Tab 2) to a Windows printer (e.g. Brother QL).
+        Tab 5 - Scan & Assign:      Scan user/device QR codes to assign owners.
 
     Authentication uses OAuth Authorization Code + PKCE (browser sign-in,
     no client secret required). Session state flows between tabs: imported
@@ -59,6 +61,7 @@ Add-Type -AssemblyName PresentationFramework
 Add-Type -AssemblyName PresentationCore
 Add-Type -AssemblyName WindowsBase
 Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
 
 #region Script-Scope State
 $script:AccessToken      = $null
@@ -88,6 +91,8 @@ $script:UploadFileMap    = [System.Collections.Generic.List[PSCustomObject]]::ne
 
 $script:ScanUserInfo     = $null
 $script:ScanDevices      = [System.Collections.Generic.List[PSCustomObject]]::new()
+$script:ScanEndUserCache = $null
+$script:ScanUserPickerIsUpdating = $false
 $script:AllowInsecureHttp = $AllowInsecureHttp.IsPresent
 
 $script:MasterPassword   = $null
@@ -789,6 +794,117 @@ function Get-DeviceInfo {
     }
 }
 
+function Get-ItamAssetIdFromDevice {
+    param([int]$DeviceId)
+    $cf = Invoke-NinjaApi -Endpoint "device/$DeviceId/custom-fields"
+    if (-not $cf) { return $null }
+    $prop = $cf.PSObject.Properties['itamAssetId']
+    if (-not $prop -or $null -eq $prop.Value) { return $null }
+    return ConvertTo-ScalarString -Value $prop.Value
+}
+
+function Get-ItamAssetSearchInfo {
+    param(
+        [Parameter(Mandatory)][int]$DeviceId,
+        [Parameter(Mandatory)][string]$BaseUrl
+    )
+    $assetId = Get-ItamAssetIdFromDevice -DeviceId $DeviceId
+    if ([string]::IsNullOrWhiteSpace($assetId)) {
+        throw "Device $DeviceId has no itamAssetId in custom fields."
+    }
+    $dashUrl = "$BaseUrl/#/assetManagement/search?assetId=$([uri]::EscapeDataString($assetId))"
+    return [PSCustomObject]@{ AssetId = $assetId; DashUrl = $dashUrl }
+}
+
+function Test-PngBytesHeader {
+    param([byte[]]$Bytes)
+    if ($null -eq $Bytes -or $Bytes.Length -lt 8) { return $false }
+    return ($Bytes[0] -eq 137 -and $Bytes[1] -eq 80 -and $Bytes[2] -eq 78 -and $Bytes[3] -eq 71 `
+        -and $Bytes[4] -eq 13 -and $Bytes[5] -eq 10 -and $Bytes[6] -eq 26 -and $Bytes[7] -eq 10)
+}
+
+function Get-QrPngBytesFromItamDashUrl {
+    param(
+        [Parameter(Mandatory)][string]$DashUrl,
+        [Parameter(Mandatory)][ValidateRange(1, 2000)][int]$PixelSize
+    )
+    $encodedUrl = [uri]::EscapeDataString($DashUrl)
+    $qrApiUrl = "https://api.qrserver.com/v1/create-qr-code/?size=${PixelSize}x${PixelSize}&data=$encodedUrl&format=png"
+    $wc = New-Object System.Net.WebClient
+    try {
+        $bytes = $wc.DownloadData($qrApiUrl)
+    } finally {
+        $wc.Dispose()
+    }
+    if ($null -eq $bytes -or $bytes.Length -le 0) {
+        throw 'QR server returned empty data.'
+    }
+    if (-not (Test-PngBytesHeader -Bytes $bytes)) {
+        throw 'Downloaded data is not a valid PNG.'
+    }
+    return $bytes
+}
+
+function New-AssetLabelBitmap {
+    param(
+        [Parameter(Mandatory)][string]$AssetId,
+        [Parameter(Mandatory)][byte[]]$QrPngBytes,
+        [Parameter(Mandatory)][double]$WidthCm,
+        [Parameter(Mandatory)][double]$HeightCm,
+        [int]$Dpi = 300
+    )
+    if ($WidthCm -le 0 -or $HeightCm -le 0) {
+        throw 'Label width and height must be positive.'
+    }
+    $wPx = [int][Math]::Ceiling($WidthCm * $Dpi / 2.54)
+    $hPx = [int][Math]::Ceiling($HeightCm * $Dpi / 2.54)
+    $bmp = New-Object System.Drawing.Bitmap([int]$wPx, [int]$hPx)
+    $bmp.SetResolution($Dpi, $Dpi)
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+    $g.Clear([System.Drawing.Color]::White)
+
+    $ms = New-Object System.IO.MemoryStream(,$QrPngBytes)
+    $qrImg = $null
+    $font = $null
+    $sf = $null
+    try {
+        $qrImg = [System.Drawing.Image]::FromStream($ms)
+
+        $pad = [int]([Math]::Max(2, [Math]::Min($wPx, $hPx) * 0.04))
+        $innerW = $wPx - 2 * $pad
+        $innerH = $hPx - 2 * $pad
+        $leftZoneW = [int]($innerW * 0.48)
+        $qrSide = [int][Math]::Min($leftZoneW, $innerH)
+        $qrX = $pad + [int](($leftZoneW - $qrSide) / 2)
+        $qrY = $pad + [int](($innerH - $qrSide) / 2)
+        $g.DrawImage($qrImg, $qrX, $qrY, $qrSide, $qrSide)
+
+        $textX = $pad + $leftZoneW + $pad
+        $textW = $wPx - $textX - $pad
+        $textH = $hPx - 2 * $pad
+        $fontPt = [Math]::Max(7.0, [Math]::Min(22.0, $textH * 72.0 / $Dpi / 5.0))
+        $font = New-Object System.Drawing.Font(
+            'Segoe UI', [single]$fontPt, [System.Drawing.FontStyle]::Bold, [System.Drawing.GraphicsUnit]::Point)
+        $brush = [System.Drawing.Brushes]::Black
+        $sf = New-Object System.Drawing.StringFormat
+        $sf.Alignment = [System.Drawing.StringAlignment]::Near
+        $sf.LineAlignment = [System.Drawing.StringAlignment]::Center
+        $sf.Trimming = [System.Drawing.StringTrimming]::EllipsisCharacter
+        $rect = New-Object System.Drawing.RectangleF(
+            [single]$textX, [single]$pad, [single]$textW, [single]$textH)
+        $labelText = "Asset ID`r`n$AssetId"
+        $g.DrawString($labelText, $font, $brush, $rect, $sf)
+    } finally {
+        if ($sf) { $sf.Dispose() }
+        if ($font) { $font.Dispose() }
+        if ($qrImg) { $qrImg.Dispose() }
+        $ms.Dispose()
+        $g.Dispose()
+    }
+    return $bmp
+}
+
 function Set-NinjaDeviceOwner {
     param([int]$DeviceId, $OwnerUid)
     Invoke-NinjaApi -Method POST -Endpoint "device/$DeviceId/owner/$OwnerUid"
@@ -805,7 +921,58 @@ function Get-QRData {
         $id = [int]$Matches[1]
         return @{ Type = 'device'; Id = $id }
     }
+    if ($t -match '[?&]assetId=([^&#]+)') {
+        $rawAsset = $Matches[1]
+        try {
+            $decoded = [uri]::UnescapeDataString($rawAsset)
+        } catch {
+            $decoded = $rawAsset
+        }
+        if (-not [string]::IsNullOrWhiteSpace($decoded)) {
+            return @{ Type = 'device'; ItamAssetId = $decoded.Trim() }
+        }
+    }
     return $null
+}
+
+function Resolve-DeviceIdFromItamAssetId {
+    param([Parameter(Mandatory)][string]$ItamAssetId)
+    $target = $ItamAssetId.Trim()
+    if ([string]::IsNullOrWhiteSpace($target)) {
+        throw "itamAssetId is empty."
+    }
+    $q = [uri]::EscapeDataString($target)
+    $resp = Invoke-NinjaApi -Endpoint "devices/search?q=$q"
+    $devices = $null
+    if ($resp -and $resp.PSObject.Properties['devices']) {
+        $devices = $resp.devices
+    }
+    if ($null -eq $devices) {
+        $devices = @()
+    } elseif ($devices -isnot [Array]) {
+        $devices = @($devices)
+    }
+    if ($devices.Count -eq 0) {
+        throw "No device found for itamAssetId '$target'."
+    }
+    $exact = $null
+    foreach ($d in $devices) {
+        $mv = $d.PSObject.Properties['matchAttrValue']
+        if (-not $mv -or $null -eq $mv.Value) { continue }
+        if ([string]::Equals(
+                $mv.Value.ToString().Trim(),
+                $target,
+                [StringComparison]::OrdinalIgnoreCase)) {
+            $exact = $d
+            break
+        }
+    }
+    $pick = if ($exact) { $exact } else { $devices[0] }
+    $idProp = $pick.PSObject.Properties['id']
+    if (-not $idProp -or $null -eq $idProp.Value) {
+        throw "Search response had no device id for itamAssetId '$target'."
+    }
+    return [int]$idProp.Value
 }
 
 function Get-DateToUnixSeconds {
@@ -1202,6 +1369,7 @@ $xaml = @"
         <Grid Margin="8">
           <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
@@ -1226,9 +1394,18 @@ $xaml = @"
             <Button Grid.Column="3" x:Name="btnQrRemoveDevice" Content="Remove"/>
           </Grid>
 
-          <ListBox Grid.Row="1" x:Name="lbQrDevices" Margin="0,0,0,8"/>
+          <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,4">
+            <Button x:Name="btnQrLoadAll" Content="All devices" Margin="0,0,8,0"
+                    ToolTip="Replace list with all devices from inventory (devices-detailed)."/>
+            <Button x:Name="btnQrLoadUnmanaged" Content="Unmanaged only" Margin="0,0,8,0"
+                    ToolTip="Replace list with devices where nodeClass is UNMANAGED_DEVICE (ITAM unmanaged)."/>
+            <Button x:Name="btnQrLoadManaged" Content="Managed only"
+                    ToolTip="Replace list with all devices except UNMANAGED_DEVICE node class."/>
+          </StackPanel>
 
-          <Grid Grid.Row="2" Margin="0,0,0,4">
+          <ListBox Grid.Row="2" x:Name="lbQrDevices" Margin="0,0,0,8"/>
+
+          <Grid Grid.Row="3" Margin="0,0,0,4">
             <Grid.ColumnDefinitions>
               <ColumnDefinition Width="70"/>
               <ColumnDefinition Width="*"/>
@@ -1240,7 +1417,7 @@ $xaml = @"
             <Button Grid.Column="2" x:Name="btnQrBrowseDir" Content="Browse..."/>
           </Grid>
 
-          <Grid Grid.Row="3" Margin="0,0,0,8">
+          <Grid Grid.Row="4" Margin="0,0,0,8">
             <Grid.ColumnDefinitions>
               <ColumnDefinition Width="70"/>
               <ColumnDefinition Width="Auto"/>
@@ -1253,11 +1430,11 @@ $xaml = @"
                     Content="Generate QR Codes" FontWeight="SemiBold"/>
           </Grid>
 
-          <StackPanel Grid.Row="4" Orientation="Horizontal" Margin="0,0,0,4">
+          <StackPanel Grid.Row="5" Orientation="Horizontal" Margin="0,0,0,4">
             <TextBlock Text="Generated: "/>
             <TextBlock x:Name="lblQrGenCount" Text="0"/>
           </StackPanel>
-          <ListBox Grid.Row="5" x:Name="lbQrResults"/>
+          <ListBox Grid.Row="6" x:Name="lbQrResults"/>
         </Grid>
       </TabItem>
 
@@ -1296,7 +1473,7 @@ $xaml = @"
             <TextBlock Text="Description" VerticalAlignment="Center"/>
             <TextBox Grid.Column="1" x:Name="tbUploadDesc" Height="28"
                      VerticalContentAlignment="Center"
-                     Text="Device dashboard QR code"/>
+                     Text="ITAM asset QR code"/>
             <CheckBox Grid.Column="2" x:Name="chkUploadReplace"
                       Content="Replace existing" VerticalAlignment="Center"
                       Margin="12,0,0,0"/>
@@ -1314,7 +1491,101 @@ $xaml = @"
         </Grid>
       </TabItem>
 
-      <!-- Tab 4: Scan & Assign -->
+      <!-- Tab 4: Print Labels -->
+      <TabItem Header="Print Labels" x:Name="tabPrint">
+        <Grid Margin="8">
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+          </Grid.RowDefinitions>
+
+          <Grid Grid.Row="0" Margin="0,0,0,4">
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="*"/>
+              <ColumnDefinition Width="Auto"/>
+              <ColumnDefinition Width="Auto"/>
+              <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <TextBox x:Name="tbPrintDeviceId" Height="28"
+                     VerticalContentAlignment="Center"
+                     ToolTip="Enter a device ID to add"/>
+            <Button Grid.Column="1" x:Name="btnPrintAddDevice" Content="Add"/>
+            <Button Grid.Column="2" x:Name="btnPrintRefreshImport"
+                    Content="From Import"
+                    ToolTip="Load devices imported in the Import tab"/>
+            <Button Grid.Column="3" x:Name="btnPrintRemoveDevice" Content="Remove"/>
+          </Grid>
+
+          <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,4">
+            <Button x:Name="btnPrintLoadAll" Content="All devices" Margin="0,0,8,0"
+                    ToolTip="Replace list with all devices from inventory (devices-detailed)."/>
+            <Button x:Name="btnPrintLoadUnmanaged" Content="Unmanaged only" Margin="0,0,8,0"
+                    ToolTip="Replace list with UNMANAGED_DEVICE only."/>
+            <Button x:Name="btnPrintLoadManaged" Content="Managed only"
+                    ToolTip="Replace list with all devices except UNMANAGED_DEVICE."/>
+          </StackPanel>
+
+          <ListBox Grid.Row="2" x:Name="lbPrintDevices" MinHeight="100" Margin="0,0,0,8"/>
+
+          <StackPanel Grid.Row="3" Orientation="Horizontal" Margin="0,0,0,8">
+            <Button x:Name="btnPrintCopyFromQrGen" Content="Copy from Generate QR tab"
+                    ToolTip="Replace this list with the same device lines as the Generate QR Codes tab."/>
+          </StackPanel>
+
+          <Grid Grid.Row="4" Margin="0,0,0,4">
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="Auto"/>
+              <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <TextBlock Text="Printer" VerticalAlignment="Center" Margin="0,0,8,0"/>
+            <ComboBox Grid.Column="1" x:Name="cbPrintPrinter" Height="26"
+                      IsEditable="False"/>
+          </Grid>
+
+          <Grid Grid.Row="5" Margin="0,0,0,4">
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="Auto"/>
+              <ColumnDefinition Width="72"/>
+              <ColumnDefinition Width="Auto"/>
+              <ColumnDefinition Width="72"/>
+              <ColumnDefinition Width="*"/>
+              <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <TextBlock Text="Label (cm)" VerticalAlignment="Center"/>
+            <TextBox Grid.Column="1" x:Name="tbPrintWidthCm" Height="28"
+                     VerticalContentAlignment="Center"
+                     ToolTip="Physical label width in centimeters (match your roll)."/>
+            <TextBlock Grid.Column="2" Text="×" Margin="8,0" VerticalAlignment="Center"/>
+            <TextBox Grid.Column="3" x:Name="tbPrintHeightCm" Height="28"
+                     VerticalContentAlignment="Center"
+                     ToolTip="Physical label height in centimeters."/>
+            <Button Grid.Column="5" x:Name="btnPrintPresetDk1201"
+                    Content="DK-1201 (9×2.9)" Margin="12,0,0,0"
+                    ToolTip="Standard address label; match orientation to the driver."/>
+          </Grid>
+
+          <TextBlock Grid.Row="6" TextWrapping="Wrap" Foreground="Gray" FontSize="11" Margin="0,0,0,8"
+                     Text="Match width/height to the loaded roll (e.g. Brother QL). Select the same media in Windows printer properties if labels misfeed."/>
+
+          <Grid Grid.Row="7">
+            <Grid.RowDefinitions>
+              <RowDefinition Height="Auto"/>
+              <RowDefinition Height="120"/>
+            </Grid.RowDefinitions>
+            <Button Grid.Row="0" x:Name="btnPrintLabels" Content="Print label(s)"
+                    FontWeight="SemiBold" HorizontalAlignment="Left" Margin="0,0,0,8"/>
+            <ListBox Grid.Row="1" x:Name="lbPrintResults"/>
+          </Grid>
+        </Grid>
+      </TabItem>
+
+      <!-- Tab 5: Scan & Assign -->
       <TabItem Header="Scan &amp; Assign" x:Name="tabScan">
         <Grid Margin="8">
           <Grid.RowDefinitions>
@@ -1332,15 +1603,26 @@ $xaml = @"
 
           <GroupBox Grid.Row="1" Header="Step 1 &#x2014; User">
             <Grid Margin="2">
+              <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+              </Grid.RowDefinitions>
               <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition Width="Auto"/>
               </Grid.ColumnDefinitions>
-              <TextBlock x:Name="lblScanUserInfo" TextWrapping="Wrap"
-                         VerticalAlignment="Center" Foreground="Gray"
-                         Text="No user scanned. Scan a user QR code to begin."/>
-              <Button x:Name="btnScanClearUser" Grid.Column="1" Content="Clear"
+              <TextBlock Grid.Row="0" Grid.ColumnSpan="2" TextWrapping="Wrap" Foreground="Gray"
+                         Text="Type to find an end user, press Enter to select, or scan a user QR code."/>
+              <ComboBox x:Name="cbScanUserPick" Grid.Row="1" Height="28" FontSize="12" Margin="0,6,8,0"
+                        IsEditable="True" IsTextSearchEnabled="False" StaysOpenOnEdit="True"
+                        VerticalContentAlignment="Center"
+                        ToolTip="Type user name or email to search end users, then press Enter or pick from the list."/>
+              <Button x:Name="btnScanClearUser" Grid.Row="1" Grid.Column="1" Content="Clear" Margin="0,6,0,0"
                       Visibility="Collapsed" VerticalAlignment="Center"/>
+              <TextBlock x:Name="lblScanUserInfo" Grid.Row="2" Grid.ColumnSpan="2" Margin="0,6,0,0"
+                         TextWrapping="Wrap" VerticalAlignment="Center" Foreground="Gray"
+                         Text="No user selected. Type/select an end user or scan a user QR code to begin."/>
             </Grid>
           </GroupBox>
 
@@ -1426,6 +1708,9 @@ $tbQrDeviceId        = $window.FindName('tbQrDeviceId')
 $btnQrAddDevice      = $window.FindName('btnQrAddDevice')
 $btnQrRefreshImport  = $window.FindName('btnQrRefreshImport')
 $btnQrRemoveDevice   = $window.FindName('btnQrRemoveDevice')
+$btnQrLoadAll        = $window.FindName('btnQrLoadAll')
+$btnQrLoadUnmanaged  = $window.FindName('btnQrLoadUnmanaged')
+$btnQrLoadManaged    = $window.FindName('btnQrLoadManaged')
 $lbQrDevices         = $window.FindName('lbQrDevices')
 $tbQrOutputDir       = $window.FindName('tbQrOutputDir')
 $btnQrBrowseDir      = $window.FindName('btnQrBrowseDir')
@@ -1433,6 +1718,23 @@ $cbQrSize            = $window.FindName('cbQrSize')
 $btnQrGenerate       = $window.FindName('btnQrGenerate')
 $lbQrResults         = $window.FindName('lbQrResults')
 $lblQrGenCount       = $window.FindName('lblQrGenCount')
+
+$tabPrint            = $window.FindName('tabPrint')
+$tbPrintDeviceId     = $window.FindName('tbPrintDeviceId')
+$btnPrintAddDevice   = $window.FindName('btnPrintAddDevice')
+$btnPrintRefreshImport = $window.FindName('btnPrintRefreshImport')
+$btnPrintRemoveDevice = $window.FindName('btnPrintRemoveDevice')
+$btnPrintLoadAll     = $window.FindName('btnPrintLoadAll')
+$btnPrintLoadUnmanaged = $window.FindName('btnPrintLoadUnmanaged')
+$btnPrintLoadManaged = $window.FindName('btnPrintLoadManaged')
+$lbPrintDevices      = $window.FindName('lbPrintDevices')
+$btnPrintCopyFromQrGen = $window.FindName('btnPrintCopyFromQrGen')
+$cbPrintPrinter      = $window.FindName('cbPrintPrinter')
+$tbPrintWidthCm      = $window.FindName('tbPrintWidthCm')
+$tbPrintHeightCm     = $window.FindName('tbPrintHeightCm')
+$btnPrintPresetDk1201 = $window.FindName('btnPrintPresetDk1201')
+$btnPrintLabels      = $window.FindName('btnPrintLabels')
+$lbPrintResults      = $window.FindName('lbPrintResults')
 
 $tabUpload           = $window.FindName('tabUpload')
 $tbUploadDir         = $window.FindName('tbUploadDir')
@@ -1446,6 +1748,7 @@ $lblUploadCount      = $window.FindName('lblUploadCount')
 
 $tabScan             = $window.FindName('tabScan')
 $tbScanInput         = $window.FindName('tbScanInput')
+$cbScanUserPick      = $window.FindName('cbScanUserPick')
 $lblScanUserInfo     = $window.FindName('lblScanUserInfo')
 $btnScanClearUser    = $window.FindName('btnScanClearUser')
 $lbScanDevices       = $window.FindName('lbScanDevices')
@@ -1488,6 +1791,15 @@ foreach ($size in @(100, 150, 200, 250, 300, 400, 500, 600)) {
 }
 $cbQrSize.SelectedIndex = 2
 
+$tbPrintWidthCm.Text = '9.0'
+$tbPrintHeightCm.Text = '2.9'
+foreach ($pn in [System.Drawing.Printing.PrinterSettings]::InstalledPrinters) {
+    $cbPrintPrinter.Items.Add($pn) | Out-Null
+}
+if ($cbPrintPrinter.Items.Count -gt 0) {
+    $cbPrintPrinter.SelectedIndex = 0
+}
+
 foreach ($yr in @('1 years', '2 years', '3 years', '4 years', '5 years')) {
     $cbManualExpLifetime.Items.Add($yr) | Out-Null
 }
@@ -1503,9 +1815,209 @@ function Push-UIUpdate {
     [System.Windows.Threading.Dispatcher]::PushFrame($frame)
 }
 
+function Format-ScanUserDisplay {
+    param(
+        [Parameter(Mandatory = $true)]
+        [PSCustomObject]$UserInfo
+    )
+    $display = $UserInfo.Name
+    if ($UserInfo.Email) { $display += "  ($($UserInfo.Email))" }
+    $display += "  |  UID: $($UserInfo.Uid)"
+    return $display
+}
+
+function Ensure-ScanEndUserCache {
+    if ($null -ne $script:ScanEndUserCache) {
+        return $script:ScanEndUserCache
+    }
+
+    $lblStatus.Text = 'Loading end users for Scan & Assign...'
+    Push-UIUpdate
+
+    $usersResp = Invoke-NinjaApi -Endpoint 'users'
+    $allUsers = @(ConvertTo-ListItems -Response $usersResp)
+    $seen = @{}
+    $endUsers = [System.Collections.Generic.List[PSCustomObject]]::new()
+
+    foreach ($u in $allUsers) {
+        if (-not ($u.PSObject.Properties['userType'] -and $u.userType -eq 'END_USER')) {
+            continue
+        }
+
+        $first = ConvertTo-ScalarString -Value $u.firstname
+        $last  = ConvertTo-ScalarString -Value $u.lastname
+        $email = ConvertTo-ScalarString -Value $u.email
+        $uid   = ConvertTo-ScalarString -Value $u.uid
+        $nameParts = @()
+        if ($first) { $nameParts += $first }
+        if ($last)  { $nameParts += $last }
+        $name = $nameParts -join ' '
+        if ([string]::IsNullOrWhiteSpace($name)) {
+            $name = if ($email) { $email } else { "User $($u.id)" }
+        }
+        $key = if ($uid) { "uid:$uid" } else { "id:$($u.id)" }
+        if ($seen.ContainsKey($key)) { continue }
+        $seen[$key] = $true
+        $display = if ($email) { "$name ($email)" } else { $name }
+
+        $endUsers.Add([PSCustomObject]@{
+                Id           = $u.id
+                Uid          = if ($uid) { $uid } else { $u.id }
+                Name         = $name
+                Email        = $email
+                Display      = $display
+                NameLower    = $name.ToLowerInvariant()
+                EmailLower   = if ($email) { $email.ToLowerInvariant() } else { '' }
+                DisplayLower = $display.ToLowerInvariant()
+            })
+    }
+
+    $script:ScanEndUserCache = @($endUsers | Sort-Object Name, Email)
+    return $script:ScanEndUserCache
+}
+
+function Get-ScanUserMatches {
+    param(
+        [string]$SearchText,
+        [int]$MaxResults = 50
+    )
+
+    $allUsers = @(Ensure-ScanEndUserCache)
+    if ($allUsers.Count -eq 0) { return @() }
+
+    $needle = if ($SearchText) { $SearchText.Trim().ToLowerInvariant() } else { '' }
+    if ([string]::IsNullOrWhiteSpace($needle)) {
+        return @($allUsers | Select-Object -First $MaxResults)
+    }
+
+    $ranked = @(
+        @($allUsers | Where-Object { $_.NameLower -eq $needle -or $_.EmailLower -eq $needle -or $_.DisplayLower -eq $needle })
+        @($allUsers | Where-Object { $_.NameLower.StartsWith($needle) -or $_.EmailLower.StartsWith($needle) })
+        @($allUsers | Where-Object { $_.DisplayLower.Contains($needle) })
+    )
+
+    $seen = @{}
+    $matches = [System.Collections.Generic.List[PSCustomObject]]::new()
+    foreach ($set in $ranked) {
+        foreach ($user in $set) {
+            $key = if ($user.Uid) { "uid:$($user.Uid)" } else { "id:$($user.Id)" }
+            if ($seen.ContainsKey($key)) { continue }
+            $seen[$key] = $true
+            $matches.Add($user)
+            if ($matches.Count -ge $MaxResults) { break }
+        }
+        if ($matches.Count -ge $MaxResults) { break }
+    }
+
+    return @($matches)
+}
+
+function Refresh-ScanUserPicker {
+    param(
+        [string]$SearchText,
+        [switch]$OpenDropDown
+    )
+
+    $typedText = $cbScanUserPick.Text
+    $matches = Get-ScanUserMatches -SearchText $SearchText
+    $script:ScanUserPickerIsUpdating = $true
+    try {
+        $cbScanUserPick.ItemsSource = $null
+        $cbScanUserPick.ItemsSource = $matches
+        $cbScanUserPick.DisplayMemberPath = 'Display'
+        $cbScanUserPick.Text = $typedText
+        if ($OpenDropDown) {
+            $cbScanUserPick.IsDropDownOpen = (-not [string]::IsNullOrWhiteSpace($SearchText) -and $matches.Count -gt 0)
+        }
+    } finally {
+        $script:ScanUserPickerIsUpdating = $false
+    }
+}
+
+function Try-SelectScanUserFromText {
+    param(
+        [string]$InputText,
+        [switch]$Quiet
+    )
+
+    $typed = if ($InputText) { $InputText.Trim() } else { '' }
+    if ([string]::IsNullOrWhiteSpace($typed)) { return $false }
+
+    $match = @(Get-ScanUserMatches -SearchText $typed -MaxResults 1) | Select-Object -First 1
+    if ($null -eq $match) {
+        if (-not $Quiet) {
+            $lblStatus.Text = "No end user match found for '$typed'."
+            [System.Media.SystemSounds]::Hand.Play()
+        }
+        return $false
+    }
+
+    Set-ScanSelectedUser -UserInfo $match -SyncPickerText
+    [System.Media.SystemSounds]::Asterisk.Play()
+    return $true
+}
+
+function Set-ScanSelectedUser {
+    param(
+        [Parameter(Mandatory = $true)]
+        [PSCustomObject]$UserInfo,
+        [switch]$SyncPickerText
+    )
+
+    $script:ScanUserInfo = [PSCustomObject]@{
+        Id    = $UserInfo.Id
+        Uid   = $UserInfo.Uid
+        Name  = $UserInfo.Name
+        Email = $UserInfo.Email
+    }
+    $lblScanUserInfo.Text = Format-ScanUserDisplay -UserInfo $script:ScanUserInfo
+    $lblScanUserInfo.Foreground = [System.Windows.Media.Brushes]::Black
+    $btnScanClearUser.Visibility = 'Visible'
+
+    if ($SyncPickerText) {
+        $pickerText = if ($script:ScanUserInfo.Email) {
+            "$($script:ScanUserInfo.Name) ($($script:ScanUserInfo.Email))"
+        } else {
+            $script:ScanUserInfo.Name
+        }
+        $script:ScanUserPickerIsUpdating = $true
+        try {
+            $cbScanUserPick.IsDropDownOpen = $false
+            $cbScanUserPick.Text = $pickerText
+        } finally {
+            $script:ScanUserPickerIsUpdating = $false
+        }
+    }
+
+    Update-ScanState
+}
+
+function Clear-ScanSelectedUser {
+    param(
+        [switch]$SkipStateUpdate
+    )
+
+    $script:ScanUserInfo = $null
+    $lblScanUserInfo.Text = 'No user selected. Type/select an end user or scan a user QR code to begin.'
+    $lblScanUserInfo.Foreground = [System.Windows.Media.Brushes]::Gray
+    $btnScanClearUser.Visibility = 'Collapsed'
+    $script:ScanUserPickerIsUpdating = $true
+    try {
+        $cbScanUserPick.SelectedItem = $null
+        $cbScanUserPick.Text = ''
+        $cbScanUserPick.IsDropDownOpen = $false
+    } finally {
+        $script:ScanUserPickerIsUpdating = $false
+    }
+
+    if (-not $SkipStateUpdate) {
+        Update-ScanState
+    }
+}
+
 function Update-ScanState {
     if ($null -eq $script:ScanUserInfo) {
-        $lblStatus.Text = 'Scan a user QR code (Step 1).'
+        $lblStatus.Text = 'Select an end user by typing/autocomplete (Step 1) or scan a user QR code.'
         $btnScanAssign.IsEnabled = $false
     } elseif ($script:ScanDevices.Count -eq 0) {
         $lblStatus.Text = "User: $($script:ScanUserInfo.Name). Scan device QR codes (Step 2)."
@@ -1519,12 +2031,9 @@ function Update-ScanState {
 }
 
 function Reset-ScanAll {
-    $script:ScanUserInfo = $null
+    Clear-ScanSelectedUser -SkipStateUpdate
     $script:ScanDevices.Clear()
     $lbScanDevices.Items.Clear()
-    $lblScanUserInfo.Text = 'No user scanned. Scan a user QR code to begin.'
-    $lblScanUserInfo.Foreground = [System.Windows.Media.Brushes]::Gray
-    $btnScanClearUser.Visibility = 'Collapsed'
     Update-ScanState
     $tbScanInput.Clear()
     $tbScanInput.Focus()
@@ -1606,6 +2115,7 @@ $btnSignIn.Add_Click({
             $script:LocationCache = $null
             $script:RoleCache     = $null
             $script:StagedRoleCache = $null
+            $script:ScanEndUserCache = $null
             $btnSignIn.IsEnabled = $true
             return
         } catch {
@@ -1772,7 +2282,8 @@ $btnSignIn.Add_Click({
                 $script:OrgCache      = $null
                 $script:LocationCache = $null
                 $script:RoleCache     = $null
-            $script:StagedRoleCache = $null
+                $script:StagedRoleCache = $null
+                $script:ScanEndUserCache = $null
             }
             elseif ($queryString -match '[?&]error=([^&]+)') {
                 $errMsg = [uri]::UnescapeDataString($Matches[1])
@@ -2345,6 +2856,102 @@ $btnManualAdd.Add_Click({
 
 #region Tab 2: Generate QR Codes
 
+function Invoke-QrReplaceDevicesFromInventory {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('All', 'Unmanaged', 'Managed')]
+        [string]$Mode,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('Qr', 'Print')]
+        [string]$ForTab
+    )
+    if (-not (Test-SignedIn)) { return }
+
+    if (-not (Test-TokenValid)) {
+        try {
+            Invoke-TokenRefresh
+        } catch {
+            $lblStatus.Text = "Token refresh failed: $($_.Exception.Message)"
+            [System.Media.SystemSounds]::Hand.Play()
+            return
+        }
+    }
+
+    $listBox = if ($ForTab -eq 'Print') { $lbPrintDevices } else { $lbQrDevices }
+    $lblStatus.Text = 'Loading devices from inventory...'
+    Push-UIUpdate
+
+    if ($ForTab -eq 'Print') {
+        $btnPrintLoadAll.IsEnabled = $false
+        $btnPrintLoadUnmanaged.IsEnabled = $false
+        $btnPrintLoadManaged.IsEnabled = $false
+        $btnPrintLabels.IsEnabled = $false
+    } else {
+        $btnQrLoadAll.IsEnabled = $false
+        $btnQrLoadUnmanaged.IsEnabled = $false
+        $btnQrLoadManaged.IsEnabled = $false
+        $btnQrGenerate.IsEnabled = $false
+    }
+    try {
+        $raw = Invoke-NinjaApi -Endpoint 'devices-detailed'
+        $list = @($raw)
+        $items = [System.Collections.Generic.List[PSCustomObject]]::new()
+        foreach ($d in $list) {
+            $idProp = $d.PSObject.Properties['id']
+            if (-not $idProp -or $null -eq $idProp.Value) { continue }
+            $id = 0
+            if (-not [int]::TryParse($idProp.Value.ToString(), [ref]$id) -or $id -le 0) { continue }
+
+            $nc = $null
+            $ncProp = $d.PSObject.Properties['nodeClass']
+            if ($ncProp -and $null -ne $ncProp.Value) { $nc = $ncProp.Value.ToString() }
+
+            if ($Mode -eq 'Unmanaged' -and $nc -ne 'UNMANAGED_DEVICE') { continue }
+            if ($Mode -eq 'Managed' -and $nc -eq 'UNMANAGED_DEVICE') { continue }
+
+            $displayName = $null
+            $dnProp = $d.PSObject.Properties['displayName']
+            if ($dnProp) { $displayName = ConvertTo-ScalarString -Value $dnProp.Value }
+            $systemName = $null
+            $snProp = $d.PSObject.Properties['systemName']
+            if ($snProp) { $systemName = ConvertTo-ScalarString -Value $snProp.Value }
+
+            $name = if ($displayName) { $displayName } elseif ($systemName) { $systemName } else { "Device $id" }
+            [void]$items.Add([PSCustomObject]@{ Id = $id; Line = "ID: $id | $name" })
+        }
+        $listBox.Items.Clear()
+        foreach ($row in ($items | Sort-Object Id)) {
+            $listBox.Items.Add($row.Line) | Out-Null
+        }
+        $labelMode = switch ($Mode) {
+            'All' { 'All devices' }
+            'Unmanaged' { 'Unmanaged only' }
+            'Managed' { 'Managed only' }
+        }
+        $which = if ($ForTab -eq 'Print') { 'print' } else { 'QR' }
+        $lblStatus.Text = "${labelMode}: loaded $($listBox.Items.Count) device(s) into the ${which} list."
+    } catch {
+        $lblStatus.Text = "Failed to load devices: $($_.Exception.Message)"
+        [System.Media.SystemSounds]::Hand.Play()
+    } finally {
+        if ($ForTab -eq 'Print') {
+            $btnPrintLoadAll.IsEnabled = $true
+            $btnPrintLoadUnmanaged.IsEnabled = $true
+            $btnPrintLoadManaged.IsEnabled = $true
+            $btnPrintLabels.IsEnabled = $true
+        } else {
+            $btnQrLoadAll.IsEnabled = $true
+            $btnQrLoadUnmanaged.IsEnabled = $true
+            $btnQrLoadManaged.IsEnabled = $true
+            $btnQrGenerate.IsEnabled = $true
+        }
+    }
+}
+
+$btnQrLoadAll.Add_Click({ Invoke-QrReplaceDevicesFromInventory -Mode 'All' -ForTab 'Qr' })
+$btnQrLoadUnmanaged.Add_Click({ Invoke-QrReplaceDevicesFromInventory -Mode 'Unmanaged' -ForTab 'Qr' })
+$btnQrLoadManaged.Add_Click({ Invoke-QrReplaceDevicesFromInventory -Mode 'Managed' -ForTab 'Qr' })
+
 $btnQrAddDevice.Add_Click({
     $idText = $tbQrDeviceId.Text.Trim()
     if ([string]::IsNullOrWhiteSpace($idText) -or $idText -notmatch '^\d+$') {
@@ -2414,6 +3021,7 @@ $btnQrBrowseDir.Add_Click({
 })
 
 $btnQrGenerate.Add_Click({
+    if (-not (Test-SignedIn)) { return }
     if ($lbQrDevices.Items.Count -eq 0) {
         $lblStatus.Text = 'No devices in the list. Add device IDs first.'
         [System.Media.SystemSounds]::Hand.Play()
@@ -2446,6 +3054,14 @@ $btnQrGenerate.Add_Click({
     $baseUrl = if ($script:NinjaBaseUrl) { $script:NinjaBaseUrl }
                else { Resolve-BaseUrl -Instance $tbInstance.Text }
 
+    if (-not (Test-TokenValid)) {
+        try { Invoke-TokenRefresh } catch {
+            $lblStatus.Text = "Token refresh failed: $($_.Exception.Message)"
+            [System.Media.SystemSounds]::Hand.Play()
+            return
+        }
+    }
+
     $btnQrGenerate.IsEnabled = $false
     $lbQrResults.Items.Clear()
     $script:GeneratedQRFiles.Clear()
@@ -2461,33 +3077,16 @@ $btnQrGenerate.Add_Click({
         $lblStatus.Text = "Generating QR code $($i + 1) of $total (Device $devId)..."
         Push-UIUpdate
 
-        $dashUrl = "$baseUrl/#/deviceDashboard/$devId/overview"
-        $encodedUrl = [uri]::EscapeDataString($dashUrl)
-        $qrApiUrl = "https://api.qrserver.com/v1/create-qr-code/?size=${size}x${size}&data=$encodedUrl&format=png"
-        $outPath = Join-Path $outputDir "Device_$devId.png"
-
         try {
-            Invoke-WebRequest -Uri $qrApiUrl -OutFile $outPath -UseBasicParsing -ErrorAction Stop
-            $fileInfo = Get-Item -LiteralPath $outPath -ErrorAction Stop
-            if ($fileInfo.Length -le 0) {
-                throw "Downloaded file is empty for Device $devId."
-            }
-            $fileBytes = [System.IO.File]::ReadAllBytes($outPath)
-            if ($fileBytes.Length -lt 8 -or
-                $fileBytes[0] -ne 137 -or $fileBytes[1] -ne 80 -or
-                $fileBytes[2] -ne 78 -or $fileBytes[3] -ne 71 -or
-                $fileBytes[4] -ne 13 -or $fileBytes[5] -ne 10 -or
-                $fileBytes[6] -ne 26 -or $fileBytes[7] -ne 10) {
-                throw "Downloaded file is not a valid PNG for Device $devId."
-            }
-            $script:GeneratedQRFiles.Add([PSCustomObject]@{
-                DeviceId = $devId; Path = $outPath
-            })
+            $info = Get-ItamAssetSearchInfo -DeviceId $devId -BaseUrl $baseUrl
+            $fileBytes = Get-QrPngBytesFromItamDashUrl -DashUrl $info.DashUrl -PixelSize $size
+            $outPath = Join-Path $outputDir "Device_$devId.png"
+            [System.IO.File]::WriteAllBytes($outPath, $fileBytes)
+            $script:GeneratedQRFiles.Add([PSCustomObject]@{ DeviceId = $devId; Path = $outPath })
             $lbQrResults.Items.Add("OK: Device_$devId.png") | Out-Null
             $generated++
         } catch {
-            $lbQrResults.Items.Add(
-                "FAILED: Device $devId - $($_.Exception.Message)") | Out-Null
+            $lbQrResults.Items.Add("FAILED: Device $devId - $($_.Exception.Message)") | Out-Null
         }
     }
 
@@ -2704,7 +3303,263 @@ $btnUpload.Add_Click({
 })
 #endregion
 
-#region Tab 4: Scan & Assign
+#region Tab 4: Print Labels
+
+$btnPrintLoadAll.Add_Click({ Invoke-QrReplaceDevicesFromInventory -Mode 'All' -ForTab 'Print' })
+$btnPrintLoadUnmanaged.Add_Click({ Invoke-QrReplaceDevicesFromInventory -Mode 'Unmanaged' -ForTab 'Print' })
+$btnPrintLoadManaged.Add_Click({ Invoke-QrReplaceDevicesFromInventory -Mode 'Managed' -ForTab 'Print' })
+
+$btnPrintAddDevice.Add_Click({
+    $idText = $tbPrintDeviceId.Text.Trim()
+    if ([string]::IsNullOrWhiteSpace($idText) -or $idText -notmatch '^\d+$') {
+        $lblStatus.Text = 'Enter a valid numeric device ID.'
+        [System.Media.SystemSounds]::Hand.Play()
+        return
+    }
+    $devId = [int]$idText
+
+    foreach ($existing in $lbPrintDevices.Items) {
+        if (($existing -as [string]) -match "^ID:\s*$devId\s") {
+            $lblStatus.Text = "Device $devId is already in the list."
+            return
+        }
+    }
+
+    $devName = "Device $devId"
+    if (Test-TokenValid -or (Test-RefreshTokenPresent)) {
+        try {
+            $info = Get-DeviceInfo -DeviceId $devId
+            $devName = $info.Name
+        } catch {
+            $lblStatus.Text = "Device $devId added, but name lookup failed: $($_.Exception.Message)"
+        }
+    }
+
+    $lbPrintDevices.Items.Add("ID: $devId | $devName") | Out-Null
+    $tbPrintDeviceId.Clear()
+    $lblStatus.Text = "Added device $devId to print list."
+})
+
+$btnPrintRefreshImport.Add_Click({
+    if ($script:ImportedDevices.Count -eq 0) {
+        $lblStatus.Text = 'No devices imported yet. Use the Import Equipment tab first.'
+        [System.Media.SystemSounds]::Hand.Play()
+        return
+    }
+    $added = 0
+    foreach ($dev in $script:ImportedDevices) {
+        $alreadyExists = $false
+        foreach ($existing in $lbPrintDevices.Items) {
+            if (($existing -as [string]) -match "^ID:\s*$($dev.Id)\s") {
+                $alreadyExists = $true
+                break
+            }
+        }
+        if (-not $alreadyExists) {
+            $lbPrintDevices.Items.Add("ID: $($dev.Id) | $($dev.Name)") | Out-Null
+            $added++
+        }
+    }
+    $lblStatus.Text = "Added $added device(s) from import. Total: $($lbPrintDevices.Items.Count) in list."
+})
+
+$btnPrintRemoveDevice.Add_Click({
+    if ($lbPrintDevices.SelectedIndex -ge 0) {
+        $lbPrintDevices.Items.RemoveAt($lbPrintDevices.SelectedIndex)
+    }
+})
+
+$btnPrintCopyFromQrGen.Add_Click({
+    $lbPrintDevices.Items.Clear()
+    foreach ($line in $lbQrDevices.Items) {
+        $lbPrintDevices.Items.Add($line) | Out-Null
+    }
+    $lblStatus.Text = "Copied $($lbPrintDevices.Items.Count) device line(s) from Generate QR Codes tab."
+})
+
+$btnPrintPresetDk1201.Add_Click({
+    $tbPrintWidthCm.Text = '9.0'
+    $tbPrintHeightCm.Text = '2.9'
+    $lblStatus.Text = 'Label size set to 9.0 × 2.9 cm (DK-1201-style). Match orientation to your driver.'
+})
+
+$btnPrintLabels.Add_Click({
+    if (-not (Test-SignedIn)) { return }
+    if ($lbPrintDevices.Items.Count -eq 0) {
+        $lblStatus.Text = 'No devices in the list. Add device IDs first.'
+        [System.Media.SystemSounds]::Hand.Play()
+        return
+    }
+
+    $printerName = $cbPrintPrinter.SelectedItem -as [string]
+    if ([string]::IsNullOrWhiteSpace($printerName) -or
+        -not [System.Drawing.Printing.PrinterSettings]::IsValidPrinterName($printerName)) {
+        $lblStatus.Text = 'Select a valid printer.'
+        [System.Media.SystemSounds]::Hand.Play()
+        return
+    }
+
+    $wCm = 0.0
+    $hCm = 0.0
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    if (-not [double]::TryParse($tbPrintWidthCm.Text.Trim(), [System.Globalization.NumberStyles]::Float,
+            $inv, [ref]$wCm) -or
+        -not [double]::TryParse($tbPrintHeightCm.Text.Trim(), [System.Globalization.NumberStyles]::Float,
+            $inv, [ref]$hCm) -or
+        $wCm -le 0 -or $hCm -le 0) {
+        $lblStatus.Text = 'Enter positive label width and height in centimeters (e.g. 9.0 and 2.9).'
+        [System.Media.SystemSounds]::Hand.Play()
+        return
+    }
+
+    $baseUrl = if ($script:NinjaBaseUrl) { $script:NinjaBaseUrl }
+               else { Resolve-BaseUrl -Instance $tbInstance.Text }
+
+    if (-not (Test-TokenValid)) {
+        try { Invoke-TokenRefresh } catch {
+            $lblStatus.Text = "Token refresh failed: $($_.Exception.Message)"
+            [System.Media.SystemSounds]::Hand.Play()
+            return
+        }
+    }
+
+    $btnPrintLabels.IsEnabled = $false
+    $lbPrintResults.Items.Clear()
+    $bitmaps = [System.Collections.Generic.List[System.Drawing.Bitmap]]::new()
+    $total = $lbPrintDevices.Items.Count
+    $ok = 0
+
+    for ($i = 0; $i -lt $total; $i++) {
+        $item = $lbPrintDevices.Items[$i] -as [string]
+        if ($item -notmatch '^ID:\s*(\d+)') { continue }
+        $devId = [int]$Matches[1]
+
+        $lblStatus.Text = "Preparing label $($i + 1) of $total (Device $devId)..."
+        Push-UIUpdate
+
+        try {
+            $info = Get-ItamAssetSearchInfo -DeviceId $devId -BaseUrl $baseUrl
+            $qrPx = 512
+            $pngBytes = Get-QrPngBytesFromItamDashUrl -DashUrl $info.DashUrl -PixelSize $qrPx
+            $bmp = New-AssetLabelBitmap -AssetId $info.AssetId -QrPngBytes $pngBytes `
+                -WidthCm $wCm -HeightCm $hCm
+            $bitmaps.Add($bmp) | Out-Null
+            $lbPrintResults.Items.Add("OK: Device $devId") | Out-Null
+            $ok++
+        } catch {
+            $lbPrintResults.Items.Add("FAILED: Device $devId - $($_.Exception.Message)") | Out-Null
+        }
+    }
+
+    if ($bitmaps.Count -eq 0) {
+        $lblStatus.Text = 'No labels were prepared (all devices failed). See the list below.'
+        [System.Media.SystemSounds]::Hand.Play()
+        $btnPrintLabels.IsEnabled = $true
+        return
+    }
+
+    try {
+        $script:_printLabelBitmaps = $bitmaps
+        $script:_printLabelIndex = 0
+        $printDoc = New-Object System.Drawing.Printing.PrintDocument
+        $printDoc.PrinterSettings.PrinterName = $printerName
+        $printDoc.add_PrintPage({
+            param($sender, $e)
+            if ($script:_printLabelIndex -ge $script:_printLabelBitmaps.Count) { return }
+            $bmp = $script:_printLabelBitmaps[$script:_printLabelIndex]
+            $r = $e.MarginBounds
+            $e.Graphics.DrawImage($bmp, $r)
+            $script:_printLabelIndex++
+            $e.HasMorePages = $script:_printLabelIndex -lt $script:_printLabelBitmaps.Count
+        })
+        $printDoc.Print()
+        $printDoc.Dispose()
+        $lblStatus.Text = "Sent $ok label(s) to printer '$printerName'."
+        [System.Media.SystemSounds]::Asterisk.Play()
+    } catch {
+        $lblStatus.Text = "Print failed: $($_.Exception.Message)"
+        [System.Media.SystemSounds]::Hand.Play()
+    } finally {
+        foreach ($b in $bitmaps) {
+            if ($null -ne $b) { $b.Dispose() }
+        }
+        $script:_printLabelBitmaps = $null
+        $script:_printLabelIndex = 0
+        $btnPrintLabels.IsEnabled = $true
+    }
+})
+#endregion
+
+#region Tab 5: Scan & Assign
+
+$cbScanUserPick.Add_GotKeyboardFocus({
+    if (-not (Test-SignedIn)) { return }
+    try {
+        Refresh-ScanUserPicker -SearchText $cbScanUserPick.Text
+    } catch {
+        $lblStatus.Text = "Could not load end users: $($_.Exception.Message)"
+        [System.Media.SystemSounds]::Hand.Play()
+    }
+})
+
+$cbScanUserPick.Add_DropDownOpened({
+    if (-not (Test-SignedIn)) {
+        $cbScanUserPick.IsDropDownOpen = $false
+        return
+    }
+    try {
+        Refresh-ScanUserPicker -SearchText $cbScanUserPick.Text -OpenDropDown
+    } catch {
+        $lblStatus.Text = "Could not load end users: $($_.Exception.Message)"
+        [System.Media.SystemSounds]::Hand.Play()
+    }
+})
+
+$cbScanUserPick.Add_KeyUp({
+    param($sender, $e)
+    if ($script:ScanUserPickerIsUpdating) { return }
+    if ($e.Key -in @('Return', 'Up', 'Down', 'Tab', 'Escape', 'Left', 'Right', 'LeftShift', 'RightShift', 'LeftCtrl', 'RightCtrl')) {
+        return
+    }
+    if (-not (Test-SignedIn)) { return }
+    try {
+        Refresh-ScanUserPicker -SearchText $cbScanUserPick.Text -OpenDropDown
+    } catch {
+        $lblStatus.Text = "Could not filter end users: $($_.Exception.Message)"
+        [System.Media.SystemSounds]::Hand.Play()
+    }
+})
+
+$cbScanUserPick.Add_KeyDown({
+    param($sender, $e)
+    if ($e.Key -ne 'Return') { return }
+    $e.Handled = $true
+    if (-not (Test-SignedIn)) { return }
+
+    try {
+        $selected = Try-SelectScanUserFromText -InputText $cbScanUserPick.Text
+    } catch {
+        $lblStatus.Text = "User selection failed: $($_.Exception.Message)"
+        [System.Media.SystemSounds]::Hand.Play()
+        return
+    }
+
+    if ($selected) {
+        $cbScanUserPick.IsDropDownOpen = $false
+        $tbScanInput.Focus()
+    }
+})
+
+$cbScanUserPick.Add_SelectionChanged({
+    if ($script:ScanUserPickerIsUpdating) { return }
+    $selected = $cbScanUserPick.SelectedItem
+    if ($null -eq $selected) { return }
+
+    Set-ScanSelectedUser -UserInfo $selected -SyncPickerText
+    $cbScanUserPick.IsDropDownOpen = $false
+    [System.Media.SystemSounds]::Asterisk.Play()
+    $tbScanInput.Focus()
+})
 
 $tbScanInput.Add_KeyDown({
     param($sender, $e)
@@ -2718,7 +3573,7 @@ $tbScanInput.Add_KeyDown({
 
     $qr = Get-QRData -Text $raw
     if (-not $qr) {
-        $lblStatus.Text = 'Unrecognized QR code. Expected a NinjaOne userDashboard or deviceDashboard URL.'
+        $lblStatus.Text = 'Unrecognized QR code. Expected a NinjaOne userDashboard URL, deviceDashboard URL, or assetManagement URL with assetId.'
         [System.Media.SystemSounds]::Hand.Play()
         return
     }
@@ -2738,43 +3593,63 @@ $tbScanInput.Add_KeyDown({
             [System.Media.SystemSounds]::Hand.Play()
             return
         }
-        $script:ScanUserInfo = $userResult
-        $display = $userResult.Name
-        if ($userResult.Email) { $display += "  ($($userResult.Email))" }
-        $display += "  |  UID: $($userResult.Uid)"
-        $lblScanUserInfo.Text = $display
-        $lblScanUserInfo.Foreground = [System.Windows.Media.Brushes]::Black
-        $btnScanClearUser.Visibility = 'Visible'
+        Set-ScanSelectedUser -UserInfo $userResult -SyncPickerText
         [System.Media.SystemSounds]::Asterisk.Play()
-        Update-ScanState
     }
     elseif ($qr.Type -eq 'device') {
         if ($null -eq $script:ScanUserInfo) {
-            $lblStatus.Text = 'Scan a user QR code first (Step 1) before scanning devices.'
+            $lblStatus.Text = 'Select a user first (typed/autocomplete or user QR scan) before scanning devices.'
             [System.Media.SystemSounds]::Hand.Play()
             return
         }
-        if ($script:ScanDevices | Where-Object { $_.Id -eq $qr.Id }) {
-            $lblStatus.Text = "Device $($qr.Id) is already in the list."
+
+        $resolvedDeviceId = $null
+        if ($qr.ContainsKey('ItamAssetId') -and -not [string]::IsNullOrWhiteSpace([string]$qr['ItamAssetId'])) {
+            $lblStatus.Text = "Resolving device for asset ID $($qr['ItamAssetId'])..."
+            Push-UIUpdate
+            if (-not (Test-TokenValid)) {
+                try { Invoke-TokenRefresh } catch {
+                    $lblStatus.Text = "Token refresh failed: $($_.Exception.Message)"
+                    [System.Media.SystemSounds]::Hand.Play()
+                    return
+                }
+            }
+            try {
+                $resolvedDeviceId = Resolve-DeviceIdFromItamAssetId -ItamAssetId $qr['ItamAssetId']
+            } catch {
+                $lblStatus.Text = "Could not resolve device from asset ID: $($_.Exception.Message)"
+                [System.Media.SystemSounds]::Hand.Play()
+                return
+            }
+        } elseif ($null -ne $qr.Id) {
+            $resolvedDeviceId = [int]$qr.Id
+        } else {
+            $lblStatus.Text = 'Invalid device QR data (missing device id or asset id).'
+            [System.Media.SystemSounds]::Hand.Play()
+            return
+        }
+
+        if ($script:ScanDevices | Where-Object { $_.Id -eq $resolvedDeviceId }) {
+            $lblStatus.Text = "Device $resolvedDeviceId is already in the list."
             [System.Media.SystemSounds]::Exclamation.Play()
             return
         }
-        $lblStatus.Text = "Scanned device ID: $($qr.Id). Looking up..."
+        $lblStatus.Text = "Scanned device ID: $resolvedDeviceId. Looking up..."
         Push-UIUpdate
         try {
-            $deviceResult = Get-DeviceInfo -DeviceId $qr.Id
+            $deviceResult = Get-DeviceInfo -DeviceId $resolvedDeviceId
         } catch {
-            $requestUrl = "$($script:NinjaBaseUrl)/api/v2/device/$($qr.Id)"
+            $requestUrl = "$($script:NinjaBaseUrl)/api/v2/device/$resolvedDeviceId"
             $errMsg = $_.Exception.Message
             $innerMsg = if ($_.Exception.InnerException) { $_.Exception.InnerException.Message } else { '' }
             $statusCode = ''
             if ($_.Exception -is [System.Net.WebException] -and $_.Exception.Response) {
                 try { $statusCode = " HTTP status: $([int]$_.Exception.Response.StatusCode)" } catch { Write-Verbose "Unable to parse HTTP status code: $($_.Exception.Message)" }
             }
-            $detail = "Device $($qr.Id) lookup failed.`r`n`r`nRequest URL:`r`n$requestUrl`r`n`r`nError:$statusCode`r`n$errMsg"
+            $detail = "Device $resolvedDeviceId lookup failed.`r`n`r`nRequest URL:`r`n$requestUrl`r`n`r`nError:$statusCode`r`n$errMsg"
             if ($innerMsg) { $detail += "`r`n`r`nInner: $innerMsg" }
             $detail += "`r`n`r`nIf this is a newly imported or staged device, it may need to be approved first or take a moment to appear in the device list. Assignment requires the device to exist in NinjaOne."
-            $lblStatus.Text = "Device $($qr.Id) not found or API error. See details."
+            $lblStatus.Text = "Device $resolvedDeviceId not found or API error. See details."
             [System.Windows.MessageBox]::Show($detail, 'Device lookup failed', 'OK', 'Warning') | Out-Null
             [System.Media.SystemSounds]::Hand.Play()
             return
@@ -2790,11 +3665,7 @@ $tbScanInput.Add_KeyDown({
 })
 
 $btnScanClearUser.Add_Click({
-    $script:ScanUserInfo = $null
-    $lblScanUserInfo.Text = 'No user scanned. Scan a user QR code to begin.'
-    $lblScanUserInfo.Foreground = [System.Windows.Media.Brushes]::Gray
-    $btnScanClearUser.Visibility = 'Collapsed'
-    Update-ScanState
+    Clear-ScanSelectedUser
     $tbScanInput.Focus()
 })
 
@@ -2864,17 +3735,23 @@ $btnScanReset.Add_Click({
 #region Cross-Tab Wiring
 $tabControl.Add_SelectionChanged({
     $tab = $tabControl.SelectedItem
-    if ($tab -eq $tabQrGen -and $script:ImportedDevices.Count -gt 0 `
-        -and $lbQrDevices.Items.Count -eq 0) {
+    if ($tab -eq $tabQrGen -and $script:ImportedDevices.Count -gt 0 -and $lbQrDevices.Items.Count -eq 0) {
         $lblStatus.Text = "Imported devices available. Click 'From Import' to load them."
     }
-    elseif ($tab -eq $tabUpload -and $script:QROutputDirectory `
-        -and -not $tbUploadDir.Text) {
+    elseif ($tab -eq $tabUpload -and $script:QROutputDirectory -and -not $tbUploadDir.Text) {
         $tbUploadDir.Text = $script:QROutputDirectory
         $lblStatus.Text = 'QR output directory pre-filled from Generate tab. Click Scan Directory to find files.'
     }
+    elseif ($tab -eq $tabPrint -and $lbQrDevices.Items.Count -gt 0 -and $lbPrintDevices.Items.Count -eq 0) {
+        $lblStatus.Text = 'Devices are listed on Generate QR tab. Use Copy from Generate QR tab or load inventory here.'
+    }
     elseif ($tab -eq $tabScan) {
         if (Test-TokenValid -or (Test-RefreshTokenPresent)) {
+            try {
+                Refresh-ScanUserPicker -SearchText $cbScanUserPick.Text
+            } catch {
+                $lblStatus.Text = "Could not load end users: $($_.Exception.Message)"
+            }
             $tbScanInput.Focus()
         }
     }
