@@ -1,0 +1,3 @@
+SourceDeviceId,SourceItamAssetId,TargetDeviceId,TargetItamAssetId,RelationshipTypeId
+12345,,12346,,1
+,EXAMPLE-SRC-ASSET,,EXAMPLE-TGT-ASSET,1

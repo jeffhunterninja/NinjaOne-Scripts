@@ -51,11 +51,12 @@ You can create **unmanaged devices** (e.g. docks, monitors, peripherals) or **st
 - Set description (default "Device dashboard QR code") and optionally check "Replace existing".
 - Click "Upload All" to attach each PNG to the matching device as a related item (multipart upload). If "Replace existing" is checked, existing related items whose name matches the filename (without extension), e.g. `Device_123`, are removed before uploading. The description is the label shown for the upload.
 
-### Tab 4 — Scan & Assign
+### Tab 5 — Scan & Assign
 
-- Focus the scanner input; scan or paste a **user** dashboard URL, then one or more **device** dashboard URLs (press Enter after each).
-- User is resolved from NinjaOne `users`/`contacts`; devices from `device/{id}`. Click "Assign All to User" to set the scanned user as owner of all listed devices via `POST device/{id}/owner/{ownerUid}`. "Reset" clears the current user and device list.
-- QR content must match `userDashboard/(\d+)` or `deviceDashboard/(\d+)`.
+- Choose **Assign to user** or **Check in devices**. Focus the scanner input; press Enter after each scan or paste.
+- **Assign:** Select an end user (type-ahead, or scan a **user** dashboard URL), then scan one or more **device** URLs. Click **Assign All to User** to set the owner (`POST device/{id}/owner/{ownerUid}`) and set `itamAssetStatus` to **In use** via `PATCH device/{id}/custom-fields`.
+- **Check in:** Scan device URLs only (no user). Click **Check in all** to remove the assigned user (`DELETE device/{id}/owner`), delete ITAM asset relationships for that device (`GET` / `DELETE` `itam/asset-relationship`), and set `itamAssetStatus` to **inventory**. This does not remove QR-related **related items** (Tab 3 uploads).
+- "Reset" clears the device list (and user in assign mode). QR content must match `userDashboard/(\d+)` or `deviceDashboard/(\d+)` (or asset search URLs with `assetId`).
 
 ## CSV format (Import Equipment)
 

@@ -2,10 +2,10 @@
 <#
 .SYNOPSIS
     NinjaOne ITAM Manager - unified WPF tool for equipment import, QR code
-    generation, QR upload, physical asset label printing, and device-to-user assignment.
+    generation, QR upload, label printing, device checkout/check-in (assign + ITAM status), and ITAM asset relationships.
 
 .DESCRIPTION
-    Standalone PowerShell WPF application (no dot-sourcing) combining five
+    Standalone PowerShell WPF application (no dot-sourcing) combining six
     ITAM workflows:
 
         Tab 1 - Import Equipment:   Create unmanaged or staged devices from CSV or manual entry.
@@ -13,7 +13,8 @@
                                     bulk-load all, unmanaged-only, or managed-only devices from inventory.
         Tab 3 - Upload QR Codes:    Attach QR PNGs to devices as related items.
         Tab 4 - Print Labels:       Print labels with ITAM asset ID and QR (same URL as Tab 2) to a Windows printer (e.g. Brother QL).
-        Tab 5 - Scan & Assign:      Scan user/device QR codes to assign owners.
+        Tab 5 - Scan & Assign:      Assign devices to a user (sets itamAssetStatus to In use) or check in returned devices (unassign, remove ITAM relationships, set status to inventory).
+        Tab 6 - Asset Relationships: Bulk-create relationships from CSV or link two devices (Ninja 13+ ITAM API).
 
     Authentication uses OAuth Authorization Code + PKCE (browser sign-in,
     no client secret required). Session state flows between tabs: imported
@@ -93,7 +94,15 @@ $script:ScanUserInfo     = $null
 $script:ScanDevices      = [System.Collections.Generic.List[PSCustomObject]]::new()
 $script:ScanEndUserCache = $null
 $script:ScanUserPickerIsUpdating = $false
+$script:ScanCheckInMode  = $false
+$script:ItamStatusInUse       = 'In use'
+$script:ItamStatusInventory   = 'inventory'
 $script:AllowInsecureHttp = $AllowInsecureHttp.IsPresent
+
+$script:RelationshipCsvData   = $null
+$script:RelationshipTypeCache = $null
+$script:RelSourceDevice      = $null
+$script:RelTargetDevice      = $null
 
 $script:MasterPassword   = $null
 $script:MasterPasswordVerifier = $null
@@ -537,7 +546,11 @@ function Invoke-NinjaApi {
             } else {
                 if ($Body) {
                     $p.ContentType = 'application/json'
-                    $p.Body = ($Body | ConvertTo-Json -Depth 10)
+                    if ($Body -is [string]) {
+                        $p.Body = $Body
+                    } else {
+                        $p.Body = ($Body | ConvertTo-Json -Depth 10)
+                    }
                 } else {
                     $p.ContentType = 'application/json'
                     $p.Body = '{}'
@@ -908,6 +921,218 @@ function New-AssetLabelBitmap {
 function Set-NinjaDeviceOwner {
     param([int]$DeviceId, $OwnerUid)
     Invoke-NinjaApi -Method POST -Endpoint "device/$DeviceId/owner/$OwnerUid"
+}
+
+function Remove-NinjaDeviceOwner {
+    param([int]$DeviceId)
+    try {
+        Invoke-NinjaApi -Method DELETE -Endpoint "device/$DeviceId/owner" | Out-Null
+    } catch {
+        $code = 0
+        if ($_.Exception.Response) {
+            try { $code = [int]$_.Exception.Response.StatusCode } catch { Write-Verbose "Remove-NinjaDeviceOwner: could not read status: $($_.Exception.Message)" }
+        }
+        if ($code -eq 404) { return }
+        throw
+    }
+}
+
+function Set-NinjaDeviceItamAssetStatus {
+    param(
+        [Parameter(Mandatory)][int]$DeviceId,
+        [Parameter(Mandatory)][string]$Status
+    )
+    $body = @{ itamAssetStatus = $Status.Trim() }
+    Invoke-NinjaApi -Method PATCH -Endpoint "device/$DeviceId/custom-fields" -Body $body | Out-Null
+}
+
+function Get-ItamAssetRelationshipIdsForDevice {
+    param([Parameter(Mandatory)][int]$DeviceId)
+    $ids = [System.Collections.Generic.List[int]]::new()
+    $after = $null
+    do {
+        $ep = "itam/asset-relationship/DEVICE/$DeviceId/relations?pageSize=500"
+        if (-not [string]::IsNullOrWhiteSpace($after)) {
+            $ep += "&after=$([uri]::EscapeDataString($after))"
+        }
+        $resp = Invoke-NinjaApi -Endpoint $ep
+        $results = $null
+        if ($resp -and $resp.PSObject.Properties['results']) {
+            $results = $resp.results
+        }
+        if ($null -eq $results) {
+            $results = @()
+        } elseif ($results -isnot [Array]) {
+            $results = @($results)
+        }
+        foreach ($row in $results) {
+            if (-not $row) { continue }
+            $ridProp = $row.PSObject.Properties['relationId']
+            if (-not $ridProp -or $null -eq $ridProp.Value) { continue }
+            $ids.Add([int]$ridProp.Value) | Out-Null
+        }
+        $hasMore = $false
+        $nextCursor = $null
+        if ($resp -and $resp.PSObject.Properties['pageInfo'] -and $resp.pageInfo) {
+            $pi = $resp.pageInfo
+            if ($pi.PSObject.Properties['hasMore'] -and $pi.hasMore) {
+                $hasMore = [bool]$pi.hasMore
+            }
+            if ($pi.PSObject.Properties['nextCursor'] -and $null -ne $pi.nextCursor) {
+                $nextCursor = [string]$pi.nextCursor
+            }
+        }
+        $after = if ($hasMore -and -not [string]::IsNullOrWhiteSpace($nextCursor)) { $nextCursor } else { $null }
+    } while ($after)
+    return @($ids)
+}
+
+function Remove-ItamAssetRelationshipsByIds {
+    param(
+        [Parameter(Mandatory)]
+        [int[]]$RelationIds
+    )
+    $ids = @($RelationIds | Where-Object { $_ -gt 0 } | Select-Object -Unique)
+    if ($ids.Count -eq 0) { return }
+    for ($i = 0; $i -lt $ids.Count; $i += 100) {
+        $take = [math]::Min(100, $ids.Count - $i)
+        $batch = $ids[$i..($i + $take - 1)]
+        $qs = ($batch | ForEach-Object { "id=$_" }) -join '&'
+        try {
+            Invoke-NinjaApi -Method DELETE -Endpoint "itam/asset-relationship?$qs" | Out-Null
+        } catch {
+            $code = 0
+            if ($_.Exception.Response) {
+                try { $code = [int]$_.Exception.Response.StatusCode } catch { Write-Verbose "Remove-ItamAssetRelationshipsByIds: could not read status: $($_.Exception.Message)" }
+            }
+            if ($code -eq 404) { continue }
+            throw
+        }
+    }
+}
+
+function Invoke-NinjaDeviceCheckIn {
+    param([Parameter(Mandatory)][int]$DeviceId)
+    $lines = [System.Collections.Generic.List[string]]::new()
+    try {
+        Remove-NinjaDeviceOwner -DeviceId $DeviceId
+    } catch {
+        $lines.Add("Remove assigned user: $($_.Exception.Message)") | Out-Null
+    }
+    try {
+        $rids = Get-ItamAssetRelationshipIdsForDevice -DeviceId $DeviceId
+        if ($rids.Count -gt 0) {
+            Remove-ItamAssetRelationshipsByIds -RelationIds $rids
+        }
+    } catch {
+        $lines.Add("ITAM relationships: $($_.Exception.Message)") | Out-Null
+    }
+    try {
+        Set-NinjaDeviceItamAssetStatus -DeviceId $DeviceId -Status $script:ItamStatusInventory
+    } catch {
+        $lines.Add("Set status to inventory: $($_.Exception.Message)") | Out-Null
+    }
+    return [PSCustomObject]@{
+        HasErrors  = ($lines.Count -gt 0)
+        ErrorLines = @($lines)
+    }
+}
+
+function Get-AllRelationshipTypes {
+    $collected = [System.Collections.Generic.List[object]]::new()
+    $after = $null
+    do {
+        $ep = 'itam/asset-relationship/types?pageSize=500'
+        if (-not [string]::IsNullOrWhiteSpace($after)) {
+            $ep += "&after=$([uri]::EscapeDataString($after))"
+        }
+        $resp = Invoke-NinjaApi -Endpoint $ep
+        $results = $null
+        if ($resp -and $resp.PSObject.Properties['results']) {
+            $results = $resp.results
+        }
+        if ($null -eq $results) {
+            $results = @()
+        } elseif ($results -isnot [Array]) {
+            $results = @($results)
+        }
+        foreach ($r in $results) {
+            $collected.Add($r) | Out-Null
+        }
+        $hasMore = $false
+        $nextCursor = $null
+        if ($resp -and $resp.PSObject.Properties['pageInfo'] -and $resp.pageInfo) {
+            $pi = $resp.pageInfo
+            if ($pi.PSObject.Properties['hasMore'] -and $pi.hasMore) {
+                $hasMore = [bool]$pi.hasMore
+            }
+            if ($pi.PSObject.Properties['nextCursor'] -and $null -ne $pi.nextCursor) {
+                $nextCursor = [string]$pi.nextCursor
+            }
+        }
+        $after = if ($hasMore -and -not [string]::IsNullOrWhiteSpace($nextCursor)) { $nextCursor } else { $null }
+    } while ($after)
+    return @($collected)
+}
+
+function Invoke-CreateAssetRelationships {
+    param(
+        [Parameter(Mandatory)]
+        [object[]]$Requests
+    )
+    $parts = foreach ($r in @($Requests)) {
+        ($r | ConvertTo-Json -Depth 10 -Compress)
+    }
+    $json = '[' + ($parts -join ',') + ']'
+    return Invoke-NinjaApi -Method POST -Endpoint 'itam/asset-relationship' -Body $json
+}
+
+function Resolve-RelationshipCsvDeviceId {
+    param(
+        [Parameter(Mandatory)] $Row,
+        [Parameter(Mandatory)][ValidateSet('Source', 'Target')]
+        [string]$Side
+    )
+    $idCol    = "${Side}DeviceId"
+    $assetCol = "${Side}ItamAssetId"
+    $idStr    = Get-RowValue -Row $Row -ColumnName $idCol
+    $assetStr = Get-RowValue -Row $Row -ColumnName $assetCol
+    if (-not [string]::IsNullOrWhiteSpace($idStr)) {
+        return [int]$idStr.Trim()
+    }
+    if (-not [string]::IsNullOrWhiteSpace($assetStr)) {
+        return Resolve-DeviceIdFromItamAssetId -ItamAssetId $assetStr.Trim()
+    }
+    throw "Provide $idCol or $assetCol."
+}
+
+function Resolve-RelDeviceFromQrText {
+    param([Parameter(Mandatory)][string]$Text)
+    $qr = Get-QRData -Text $Text
+    if (-not $qr) {
+        throw 'Unrecognized QR. Use a NinjaOne device dashboard URL or ITAM asset search URL with assetId=.'
+    }
+    if ($qr.Type -eq 'user') {
+        throw 'User QR is not valid here. Scan a device or ITAM asset QR.'
+    }
+    if ($qr.Type -ne 'device') {
+        throw 'Invalid QR data.'
+    }
+    $resolvedDeviceId = $null
+    if ($qr.ContainsKey('ItamAssetId') -and -not [string]::IsNullOrWhiteSpace([string]$qr['ItamAssetId'])) {
+        $resolvedDeviceId = Resolve-DeviceIdFromItamAssetId -ItamAssetId ([string]$qr['ItamAssetId'])
+    } elseif ($null -ne $qr.Id) {
+        $resolvedDeviceId = [int]$qr.Id
+    } else {
+        throw 'QR is missing device id or asset id.'
+    }
+    $deviceResult = Get-DeviceInfo -DeviceId $resolvedDeviceId
+    $itam = Get-ItamAssetIdFromDevice -DeviceId $resolvedDeviceId
+    return [PSCustomObject]@{
+        Id          = $resolvedDeviceId
+        Name        = $deviceResult.Name
+        ItamAssetId = $itam
+    }
 }
 
 function Get-QRData {
@@ -1598,17 +1823,26 @@ $xaml = @"
           <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
           </Grid.RowDefinitions>
 
-          <GroupBox Grid.Row="0" Header="Scanner Input">
+          <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,8" VerticalAlignment="Center">
+            <TextBlock Text="Mode:" VerticalAlignment="Center" Margin="0,0,10,0" Foreground="Gray"/>
+            <RadioButton x:Name="rbScanModeAssign" Content="Assign to user" GroupName="ScanMode"
+                         IsChecked="True" Margin="0,0,16,0" VerticalAlignment="Center"/>
+            <RadioButton x:Name="rbScanModeCheckIn" Content="Check in devices" GroupName="ScanMode"
+                         VerticalAlignment="Center"/>
+          </StackPanel>
+
+          <GroupBox Grid.Row="1" Header="Scanner Input">
             <TextBox x:Name="tbScanInput" Height="28" FontSize="12"
                      VerticalContentAlignment="Center" Margin="2"
                      ToolTip="Focus this field, then scan a QR code or paste a URL and press Enter."/>
           </GroupBox>
 
-          <GroupBox Grid.Row="1" Header="Step 1 &#x2014; User">
+          <GroupBox x:Name="gbScanUserStep" Grid.Row="2" Header="Step 1 &#x2014; User">
             <Grid Margin="2">
               <Grid.RowDefinitions>
                 <RowDefinition Height="Auto"/>
@@ -1633,7 +1867,7 @@ $xaml = @"
             </Grid>
           </GroupBox>
 
-          <GroupBox Grid.Row="2" Header="Step 2 &#x2014; Devices">
+          <GroupBox Grid.Row="3" Header="Step 2 &#x2014; Devices">
             <DockPanel Margin="2">
               <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal"
                           Margin="0,6,0,0">
@@ -1646,12 +1880,91 @@ $xaml = @"
             </DockPanel>
           </GroupBox>
 
-          <StackPanel Grid.Row="3" Orientation="Horizontal"
+          <StackPanel Grid.Row="4" Orientation="Horizontal"
                       HorizontalAlignment="Center" Margin="0,0,0,4">
             <Button x:Name="btnScanAssign" Content="Assign All to User"
                     Width="170" FontWeight="SemiBold" IsEnabled="False"/>
+            <Button x:Name="btnScanCheckIn" Content="Check in all" Width="170" FontWeight="SemiBold"
+                    IsEnabled="False" Visibility="Collapsed"/>
             <Button x:Name="btnScanReset" Content="Reset" Width="100"/>
           </StackPanel>
+        </Grid>
+      </TabItem>
+
+      <!-- Tab 6: Asset Relationships -->
+      <TabItem Header="Asset Relationships" x:Name="tabRelationships">
+        <Grid Margin="8">
+          <TabControl x:Name="tcRelationships" Margin="0">
+            <TabItem Header="Import from CSV">
+              <Grid Margin="8">
+                <Grid.RowDefinitions>
+                  <RowDefinition Height="Auto"/>
+                  <RowDefinition Height="*"/>
+                  <RowDefinition Height="Auto"/>
+                  <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+                <DockPanel Grid.Row="0" LastChildFill="True" Margin="0,0,0,8">
+                  <Button x:Name="btnRelBrowseCsv" Content="Browse..." DockPanel.Dock="Right" Width="100" Margin="8,0,0,0"/>
+                  <TextBox x:Name="tbRelCsvPath" MinHeight="28" VerticalContentAlignment="Center" IsReadOnly="True"
+                           ToolTip="Relationship import CSV path"/>
+                </DockPanel>
+                <DataGrid x:Name="dgRelCsvPreview" Grid.Row="1" AutoGenerateColumns="True" IsReadOnly="True"
+                          CanUserAddRows="False" HeadersVisibility="Column" Margin="0,0,0,8"/>
+                <Button x:Name="btnRelImportCsv" Grid.Row="2" Content="Import relationships" HorizontalAlignment="Left" FontWeight="SemiBold"/>
+                <TextBlock Grid.Row="3" TextWrapping="Wrap" Foreground="Gray" Margin="0,8,0,0"
+                           Text="Required columns: RelationshipTypeId (integer from relationship types API). For each side use SourceDeviceId or SourceItamAssetId, and TargetDeviceId or TargetItamAssetId. OAuth app needs access to ITAM asset-relationship endpoints (Ninja 13+)."/>
+              </Grid>
+            </TabItem>
+            <TabItem Header="Create between devices" x:Name="tabRelCreateInner">
+              <Grid Margin="8">
+                <Grid.RowDefinitions>
+                  <RowDefinition Height="Auto"/>
+                  <RowDefinition Height="Auto"/>
+                  <RowDefinition Height="Auto"/>
+                  <RowDefinition Height="Auto"/>
+                  <RowDefinition Height="Auto"/>
+                  <RowDefinition Height="Auto"/>
+                  <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+                <DockPanel Grid.Row="0" Margin="0,0,0,8">
+                  <Button x:Name="btnRelRefreshTypes" Content="Refresh types" DockPanel.Dock="Right" Width="120" Margin="8,0,0,0"/>
+                  <ComboBox x:Name="cbRelType" Height="28" VerticalContentAlignment="Center"
+                            DisplayMemberPath="Display" SelectedValuePath="Id"
+                            ToolTip="Relationship type (from GET /api/v2/itam/asset-relationship/types)"/>
+                </DockPanel>
+                <GroupBox Grid.Row="1" Header="Scanner" Margin="0,0,0,8">
+                  <StackPanel Margin="4">
+                    <TextBlock TextWrapping="Wrap" Foreground="Gray" Margin="0,0,0,6"
+                               Text="Focus the field below, scan or paste a device / ITAM asset URL, press Enter. Choose which endpoint the scan applies to."/>
+                    <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
+                      <RadioButton x:Name="rbRelScanSource" Content="Next scan sets source" IsChecked="True" Margin="0,0,16,0"/>
+                      <RadioButton x:Name="rbRelScanTarget" Content="Next scan sets target"/>
+                    </StackPanel>
+                    <TextBox x:Name="tbRelScanInput" Height="28" FontSize="12" VerticalContentAlignment="Center"
+                             ToolTip="Scan device dashboard or ITAM asset QR, then Enter"/>
+                  </StackPanel>
+                </GroupBox>
+                <GroupBox Grid.Row="2" Header="Source device" Margin="0,0,0,8">
+                  <DockPanel Margin="4">
+                    <Button x:Name="btnRelClearSource" Content="Clear" DockPanel.Dock="Right" Width="70"/>
+                    <TextBlock x:Name="lblRelSourceInfo" TextWrapping="Wrap" Foreground="Gray"
+                               Text="Not set."/>
+                  </DockPanel>
+                </GroupBox>
+                <GroupBox Grid.Row="3" Header="Target device" Margin="0,0,0,8">
+                  <DockPanel Margin="4">
+                    <Button x:Name="btnRelClearTarget" Content="Clear" DockPanel.Dock="Right" Width="70"/>
+                    <TextBlock x:Name="lblRelTargetInfo" TextWrapping="Wrap" Foreground="Gray"
+                               Text="Not set."/>
+                  </DockPanel>
+                </GroupBox>
+                <Button x:Name="btnRelCreateRelationship" Grid.Row="4" Content="Create relationship"
+                        HorizontalAlignment="Left" FontWeight="SemiBold" IsEnabled="False" Margin="0,0,0,8"/>
+                <TextBlock Grid.Row="5" TextWrapping="Wrap" Foreground="Gray"
+                           Text="Uses POST /api/v2/itam/asset-relationship with entity type DEVICE. Device must exist in NinjaOne; ITAM asset id is shown when present in custom fields."/>
+              </Grid>
+            </TabItem>
+          </TabControl>
         </Grid>
       </TabItem>
 
@@ -1755,6 +2068,9 @@ $btnUpload           = $window.FindName('btnUpload')
 $lblUploadCount      = $window.FindName('lblUploadCount')
 
 $tabScan             = $window.FindName('tabScan')
+$rbScanModeAssign    = $window.FindName('rbScanModeAssign')
+$rbScanModeCheckIn   = $window.FindName('rbScanModeCheckIn')
+$gbScanUserStep      = $window.FindName('gbScanUserStep')
 $tbScanInput         = $window.FindName('tbScanInput')
 $cbScanUserPick      = $window.FindName('cbScanUserPick')
 $lblScanUserInfo     = $window.FindName('lblScanUserInfo')
@@ -1763,7 +2079,26 @@ $lbScanDevices       = $window.FindName('lbScanDevices')
 $lblScanDeviceCount  = $window.FindName('lblScanDeviceCount')
 $btnScanRemoveDevice = $window.FindName('btnScanRemoveDevice')
 $btnScanAssign       = $window.FindName('btnScanAssign')
+$btnScanCheckIn      = $window.FindName('btnScanCheckIn')
 $btnScanReset        = $window.FindName('btnScanReset')
+
+$tabRelationships    = $window.FindName('tabRelationships')
+$tcRelationships     = $window.FindName('tcRelationships')
+$tbRelCsvPath        = $window.FindName('tbRelCsvPath')
+$btnRelBrowseCsv     = $window.FindName('btnRelBrowseCsv')
+$dgRelCsvPreview     = $window.FindName('dgRelCsvPreview')
+$btnRelImportCsv     = $window.FindName('btnRelImportCsv')
+$tabRelCreateInner   = $window.FindName('tabRelCreateInner')
+$cbRelType           = $window.FindName('cbRelType')
+$btnRelRefreshTypes  = $window.FindName('btnRelRefreshTypes')
+$rbRelScanSource     = $window.FindName('rbRelScanSource')
+$rbRelScanTarget     = $window.FindName('rbRelScanTarget')
+$tbRelScanInput      = $window.FindName('tbRelScanInput')
+$lblRelSourceInfo    = $window.FindName('lblRelSourceInfo')
+$lblRelTargetInfo    = $window.FindName('lblRelTargetInfo')
+$btnRelClearSource   = $window.FindName('btnRelClearSource')
+$btnRelClearTarget   = $window.FindName('btnRelClearTarget')
+$btnRelCreateRelationship = $window.FindName('btnRelCreateRelationship')
 #endregion
 
 #region Initialize Defaults
@@ -1832,6 +2167,91 @@ function Format-ScanUserDisplay {
     if ($UserInfo.Email) { $display += "  ($($UserInfo.Email))" }
     $display += "  |  UID: $($UserInfo.Uid)"
     return $display
+}
+
+function Set-RelEndpointLabels {
+    param(
+        [object]$Device,
+        [Parameter(Mandatory)][bool]$IsSource
+    )
+    $tb = if ($IsSource) { $lblRelSourceInfo } else { $lblRelTargetInfo }
+    if (-not $Device) {
+        $tb.Text = 'Not set.'
+        return
+    }
+    $line = "Device ID: $($Device.Id)  |  $($Device.Name)"
+    if (-not [string]::IsNullOrWhiteSpace($Device.ItamAssetId)) {
+        $line += "  |  ITAM: $($Device.ItamAssetId)"
+    } else {
+        $line += '  |  (no itamAssetId in custom fields yet)'
+    }
+    $tb.Text = $line
+}
+
+function Update-RelCreateUiState {
+    $srcOk  = $null -ne $script:RelSourceDevice
+    $tgtOk  = $null -ne $script:RelTargetDevice
+    $typeOk = ($null -ne $cbRelType.SelectedItem)
+    $btnRelCreateRelationship.IsEnabled = ($srcOk -and $tgtOk -and $typeOk)
+}
+
+function Refresh-RelationshipTypeCombo {
+    $cbRelType.Items.Clear()
+    $lblStatus.Text = 'Loading relationship types...'
+    Push-UIUpdate
+    $types = Get-AllRelationshipTypes
+    $script:RelationshipTypeCache = $types
+    foreach ($t in $types) {
+        $idProp = $t.PSObject.Properties['id']
+        if (-not $idProp -or $null -eq $idProp.Value) { continue }
+        $id = [int]$idProp.Value
+        $fwd = ''
+        $rev = ''
+        if ($t.PSObject.Properties['forwardLabel'] -and $null -ne $t.forwardLabel) {
+            $fwd = ConvertTo-ScalarString -Value $t.forwardLabel
+        }
+        if ($t.PSObject.Properties['reverseLabel'] -and $null -ne $t.reverseLabel) {
+            $rev = ConvertTo-ScalarString -Value $t.reverseLabel
+        }
+        $disp = if ($fwd -and $rev) { "$fwd / $rev (id $id)" }
+                elseif ($fwd) { "$fwd (id $id)" }
+                elseif ($rev) { "$rev (id $id)" }
+                else { "Relationship type id $id" }
+        $cbRelType.Items.Add([PSCustomObject]@{ Display = $disp; Id = $id }) | Out-Null
+    }
+    $lblStatus.Text = "Loaded $($types.Count) relationship type(s)."
+}
+
+function Get-AssetRelationshipCreateSummary {
+    param($Resp)
+    $ok = 0
+    $errLines = [System.Collections.Generic.List[string]]::new()
+    if ($Resp -and $Resp.PSObject.Properties['successfulRelationships']) {
+        $sr = $Resp.successfulRelationships
+        if ($null -ne $sr) {
+            if ($sr -is [Array]) {
+                $ok = $sr.Count
+            } else {
+                $ok = 1
+            }
+        }
+    }
+    if ($Resp -and $Resp.PSObject.Properties['errors'] -and $Resp.errors) {
+        $er = $Resp.errors
+        if ($er -isnot [Array]) { $er = @($er) }
+        foreach ($e in $er) {
+            $msg = ''
+            if ($e.PSObject.Properties['errorMessage'] -and $null -ne $e.errorMessage) {
+                $msg = [string]$e.errorMessage
+            }
+            $prefix = ''
+            if ($e.PSObject.Properties['requestIndex'] -and $null -ne $e.requestIndex) {
+                $prefix = "Request $([int]$e.requestIndex + 1): "
+            }
+            $errLines.Add("$prefix$msg")
+        }
+    }
+    return [PSCustomObject]@{ Created = $ok; ErrorLines = @($errLines) }
 }
 
 function Ensure-ScanEndUserCache {
@@ -2024,15 +2444,31 @@ function Clear-ScanSelectedUser {
 }
 
 function Update-ScanState {
-    if ($null -eq $script:ScanUserInfo) {
-        $lblStatus.Text = 'Select an end user by typing/autocomplete (Step 1) or scan a user QR code.'
-        $btnScanAssign.IsEnabled = $false
-    } elseif ($script:ScanDevices.Count -eq 0) {
-        $lblStatus.Text = "User: $($script:ScanUserInfo.Name). Scan device QR codes (Step 2)."
-        $btnScanAssign.IsEnabled = $false
+    if ($script:ScanCheckInMode) {
+        $gbScanUserStep.Visibility = 'Collapsed'
+        $btnScanAssign.Visibility = 'Collapsed'
+        $btnScanCheckIn.Visibility = 'Visible'
+        if ($script:ScanDevices.Count -eq 0) {
+            $lblStatus.Text = 'Check-in mode: scan device QR codes, then click Check in all.'
+            $btnScanCheckIn.IsEnabled = $false
+        } else {
+            $lblStatus.Text = "Ready to check in $($script:ScanDevices.Count) device(s)."
+            $btnScanCheckIn.IsEnabled = $true
+        }
     } else {
-        $lblStatus.Text = "Ready to assign $($script:ScanDevices.Count) device(s) to $($script:ScanUserInfo.Name)."
-        $btnScanAssign.IsEnabled = $true
+        $gbScanUserStep.Visibility = 'Visible'
+        $btnScanAssign.Visibility = 'Visible'
+        $btnScanCheckIn.Visibility = 'Collapsed'
+        if ($null -eq $script:ScanUserInfo) {
+            $lblStatus.Text = 'Select an end user by typing/autocomplete (Step 1) or scan a user QR code.'
+            $btnScanAssign.IsEnabled = $false
+        } elseif ($script:ScanDevices.Count -eq 0) {
+            $lblStatus.Text = "User: $($script:ScanUserInfo.Name). Scan device QR codes (Step 2)."
+            $btnScanAssign.IsEnabled = $false
+        } else {
+            $lblStatus.Text = "Ready to assign $($script:ScanDevices.Count) device(s) to $($script:ScanUserInfo.Name)."
+            $btnScanAssign.IsEnabled = $true
+        }
     }
     $lblScanDeviceCount.Text = "$($script:ScanDevices.Count) device(s) scanned"
     $btnScanRemoveDevice.IsEnabled = ($lbScanDevices.SelectedIndex -ge 0)
@@ -2046,6 +2482,15 @@ function Reset-ScanAll {
     $tbScanInput.Clear()
     $tbScanInput.Focus()
 }
+
+$rbScanModeAssign.Add_Checked({
+    $script:ScanCheckInMode = $false
+    Update-ScanState
+})
+$rbScanModeCheckIn.Add_Checked({
+    $script:ScanCheckInMode = $true
+    Update-ScanState
+})
 #endregion
 
 #region Sign-In (Authorization Code + PKCE)
@@ -3607,6 +4052,12 @@ $tbScanInput.Add_KeyDown({
     }
 
     if ($qr.Type -eq 'user') {
+        if ($script:ScanCheckInMode) {
+            $lblStatus.Text = 'User QR codes are not used in check-in mode. Switch to Assign to user, or scan a device QR.'
+            [System.Media.SystemSounds]::Hand.Play()
+            $tbScanInput.Focus()
+            return
+        }
         $lblStatus.Text = "Scanned user ID: $($qr.Id). Looking up..."
         Push-UIUpdate
         try {
@@ -3625,7 +4076,7 @@ $tbScanInput.Add_KeyDown({
         [System.Media.SystemSounds]::Asterisk.Play()
     }
     elseif ($qr.Type -eq 'device') {
-        if ($null -eq $script:ScanUserInfo) {
+        if (-not $script:ScanCheckInMode -and $null -eq $script:ScanUserInfo) {
             $lblStatus.Text = 'Select a user first (typed/autocomplete or user QR scan) before scanning devices.'
             [System.Media.SystemSounds]::Hand.Play()
             return
@@ -3723,6 +4174,7 @@ $btnScanAssign.Add_Click({
     $errors   = [System.Collections.Generic.List[string]]::new()
 
     $btnScanAssign.IsEnabled = $false
+    $btnScanCheckIn.IsEnabled = $false
     $btnScanReset.IsEnabled  = $false
 
     for ($i = 0; $i -lt $total; $i++) {
@@ -3732,7 +4184,13 @@ $btnScanAssign.Add_Click({
 
         try {
             Set-NinjaDeviceOwner -DeviceId $dev.Id -OwnerUid $ownerUid
-            $success++
+            try {
+                Set-NinjaDeviceItamAssetStatus -DeviceId $dev.Id -Status $script:ItamStatusInUse
+                $success++
+            } catch {
+                $failed++
+                $errors.Add("$($dev.Name) (ID $($dev.Id)): Owner set but itamAssetStatus (In use) failed: $($_.Exception.Message)")
+            }
         } catch {
             $failed++
             $errors.Add("$($dev.Name) (ID $($dev.Id)): $($_.Exception.Message)")
@@ -3752,11 +4210,277 @@ $btnScanAssign.Add_Click({
     $lblStatus.Text = $summary
     $btnScanAssign.IsEnabled = $true
     $btnScanReset.IsEnabled  = $true
+    Update-ScanState
+    $tbScanInput.Focus()
+})
+
+$btnScanCheckIn.Add_Click({
+    if ($script:ScanDevices.Count -eq 0) { return }
+
+    $total   = $script:ScanDevices.Count
+    $ok      = 0
+    $partial = 0
+    $fail    = 0
+    $errors  = [System.Collections.Generic.List[string]]::new()
+
+    $btnScanAssign.IsEnabled = $false
+    $btnScanCheckIn.IsEnabled = $false
+    $btnScanReset.IsEnabled  = $false
+
+    for ($i = 0; $i -lt $total; $i++) {
+        $dev = $script:ScanDevices[$i]
+        $lblStatus.Text = "Checking in $($dev.Name) ($($i + 1)/$total)..."
+        Push-UIUpdate
+        try {
+            $result = Invoke-NinjaDeviceCheckIn -DeviceId $dev.Id
+            if ($result.HasErrors) {
+                $partial++
+                $errors.Add("$($dev.Name) (ID $($dev.Id)):`r`n  " + ($result.ErrorLines -join "`r`n  "))
+            } else {
+                $ok++
+            }
+        } catch {
+            $fail++
+            $errors.Add("$($dev.Name) (ID $($dev.Id)): $($_.Exception.Message)")
+        }
+    }
+
+    $summary = "Check-in finished. $ok of $total device(s) completed with no errors."
+    if ($partial -gt 0) { $summary += " $partial with warnings (see details)." }
+    if ($fail -gt 0) { $summary += " $fail failed." }
+    if ($partial -gt 0 -or $fail -gt 0 -or $errors.Count -gt 0) {
+        $detail = $summary + "`r`n`r`nDetails:`r`n" + ($errors -join "`r`n`r`n")
+        [System.Windows.MessageBox]::Show(
+            $detail, 'Check-in Results', 'OK', 'Warning') | Out-Null
+    } else {
+        [System.Media.SystemSounds]::Asterisk.Play()
+    }
+
+    $lblStatus.Text = $summary
+    $btnScanReset.IsEnabled = $true
+    Update-ScanState
     $tbScanInput.Focus()
 })
 
 $btnScanReset.Add_Click({
     Reset-ScanAll
+})
+
+$btnRelBrowseCsv.Add_Click({
+    $dlg = New-Object Microsoft.Win32.OpenFileDialog
+    $dlg.Filter = 'CSV files (*.csv)|*.csv|All files (*.*)|*.*'
+    $dlg.Title = 'Select asset relationships CSV'
+    if ($dlg.ShowDialog()) {
+        $tbRelCsvPath.Text = $dlg.FileName
+        try {
+            $script:RelationshipCsvData = Import-Csv -LiteralPath $dlg.FileName -Encoding UTF8
+            if ($script:RelationshipCsvData -and $script:RelationshipCsvData.Count -gt 0) {
+                $dgRelCsvPreview.ItemsSource = $script:RelationshipCsvData
+                $lblStatus.Text = "Loaded $($script:RelationshipCsvData.Count) relationship row(s). Click Import relationships."
+            } else {
+                $lblStatus.Text = 'CSV is empty or has no data rows.'
+                $script:RelationshipCsvData = $null
+            }
+        } catch {
+            $lblStatus.Text = "Failed to read CSV: $($_.Exception.Message)"
+            $script:RelationshipCsvData = $null
+        }
+    }
+})
+
+$btnRelImportCsv.Add_Click({
+    if (-not (Test-SignedIn)) { return }
+    if (-not $script:RelationshipCsvData -or $script:RelationshipCsvData.Count -eq 0) {
+        $lblStatus.Text = 'No relationship CSV loaded. Browse for a file first.'
+        [System.Media.SystemSounds]::Hand.Play()
+        return
+    }
+
+    $headerNames = @($script:RelationshipCsvData[0].PSObject.Properties.Name)
+    $hasType = $headerNames | Where-Object { $_ -ieq 'RelationshipTypeId' } | Select-Object -First 1
+    if (-not $hasType) {
+        $lblStatus.Text = "CSV is missing required column 'RelationshipTypeId'."
+        [System.Media.SystemSounds]::Hand.Play()
+        return
+    }
+
+    $btnRelImportCsv.IsEnabled = $false
+    $requests = [System.Collections.Generic.List[object]]::new()
+    $rowErrors = [System.Collections.Generic.List[string]]::new()
+    $rowNum = 0
+
+    foreach ($row in $script:RelationshipCsvData) {
+        $rowNum++
+        try {
+            $srcId = Resolve-RelationshipCsvDeviceId -Row $row -Side Source
+            $tgtId = Resolve-RelationshipCsvDeviceId -Row $row -Side Target
+            $typeStr = Get-RowValue -Row $row -ColumnName 'RelationshipTypeId'
+            if ([string]::IsNullOrWhiteSpace($typeStr)) {
+                throw "RelationshipTypeId is required."
+            }
+            $relTypeId = [int][double]$typeStr.Trim()
+            $requests.Add(@{
+                    sourceId             = $srcId
+                    sourceType           = 'DEVICE'
+                    targetId             = $tgtId
+                    targetType           = 'DEVICE'
+                    relationshipTypeId   = $relTypeId
+                }) | Out-Null
+        } catch {
+            $rowErrors.Add("Row ${rowNum}: $($_.Exception.Message)")
+        }
+    }
+
+    if ($rowErrors.Count -gt 0) {
+        $detail = "Fix these issues before calling the API:`r`n`r`n" + ($rowErrors -join "`r`n")
+        [System.Windows.MessageBox]::Show(
+            $detail, 'Relationship CSV', 'OK', 'Warning') | Out-Null
+        $lblStatus.Text = "CSV validation failed ($($rowErrors.Count) issue(s))."
+        $btnRelImportCsv.IsEnabled = $true
+        return
+    }
+
+    if ($requests.Count -eq 0) {
+        $lblStatus.Text = 'No valid rows to import.'
+        $btnRelImportCsv.IsEnabled = $true
+        return
+    }
+
+    $lblStatus.Text = "Creating $($requests.Count) relationship(s)..."
+    Push-UIUpdate
+
+    try {
+        $resp = Invoke-CreateAssetRelationships -Requests @($requests)
+        $sum = Get-AssetRelationshipCreateSummary -Resp $resp
+        $summary = "Relationships API finished. Created: $($sum.Created)."
+        if ($sum.ErrorLines.Count -gt 0) {
+            $summary += " API reported $($sum.ErrorLines.Count) error(s)."
+            $detail = $summary + "`r`n`r`n" + ($sum.ErrorLines -join "`r`n")
+            [System.Windows.MessageBox]::Show(
+                $detail, 'Relationship import', 'OK', 'Warning') | Out-Null
+        } else {
+            [System.Media.SystemSounds]::Asterisk.Play()
+        }
+        $lblStatus.Text = $summary
+    } catch {
+        $lblStatus.Text = "Relationship import failed: $($_.Exception.Message)"
+        [System.Windows.MessageBox]::Show(
+            $_.Exception.Message, 'Relationship import', 'OK', 'Error') | Out-Null
+    }
+
+    $btnRelImportCsv.IsEnabled = $true
+})
+
+$btnRelRefreshTypes.Add_Click({
+    if (-not (Test-SignedIn)) { return }
+    $btnRelRefreshTypes.IsEnabled = $false
+    try {
+        Refresh-RelationshipTypeCombo
+    } catch {
+        $lblStatus.Text = "Could not load relationship types: $($_.Exception.Message)"
+    }
+    $btnRelRefreshTypes.IsEnabled = $true
+    Update-RelCreateUiState
+})
+
+$cbRelType.Add_SelectionChanged({ Update-RelCreateUiState })
+
+$btnRelClearSource.Add_Click({
+    $script:RelSourceDevice = $null
+    Set-RelEndpointLabels -Device $null -IsSource $true
+    Update-RelCreateUiState
+    $tbRelScanInput.Focus()
+})
+
+$btnRelClearTarget.Add_Click({
+    $script:RelTargetDevice = $null
+    Set-RelEndpointLabels -Device $null -IsSource $false
+    Update-RelCreateUiState
+    $tbRelScanInput.Focus()
+})
+
+$tbRelScanInput.Add_KeyDown({
+    param($sender, $e)
+    if ($e.Key -ne 'Return') { return }
+    $e.Handled = $true
+    $raw = $tbRelScanInput.Text
+    $tbRelScanInput.Clear()
+
+    if ([string]::IsNullOrWhiteSpace($raw)) { return }
+    if (-not (Test-SignedIn)) { return }
+
+    try {
+        $dev = Resolve-RelDeviceFromQrText -Text $raw
+        if ($rbRelScanSource.IsChecked -eq $true) {
+            $script:RelSourceDevice = $dev
+            Set-RelEndpointLabels -Device $dev -IsSource $true
+        } else {
+            $script:RelTargetDevice = $dev
+            Set-RelEndpointLabels -Device $dev -IsSource $false
+        }
+        Update-RelCreateUiState
+        [System.Media.SystemSounds]::Asterisk.Play()
+    } catch {
+        $lblStatus.Text = $_.Exception.Message
+        [System.Media.SystemSounds]::Hand.Play()
+    }
+
+    $tbRelScanInput.Focus()
+})
+
+$btnRelCreateRelationship.Add_Click({
+    if (-not (Test-SignedIn)) { return }
+    if ($null -eq $script:RelSourceDevice -or $null -eq $script:RelTargetDevice) { return }
+    $sel = $cbRelType.SelectedItem
+    if ($null -eq $sel) { return }
+
+    $typeId = [int]$sel.Id
+    $req = @{
+        sourceId             = $script:RelSourceDevice.Id
+        sourceType           = 'DEVICE'
+        targetId             = $script:RelTargetDevice.Id
+        targetType           = 'DEVICE'
+        relationshipTypeId   = $typeId
+    }
+
+    $btnRelCreateRelationship.IsEnabled = $false
+    try {
+        $resp = Invoke-CreateAssetRelationships -Requests @($req)
+        $sum = Get-AssetRelationshipCreateSummary -Resp $resp
+        if ($sum.Created -gt 0 -and $sum.ErrorLines.Count -eq 0) {
+            $lblStatus.Text = 'Relationship created successfully.'
+            [System.Media.SystemSounds]::Asterisk.Play()
+        } elseif ($sum.Created -gt 0 -and $sum.ErrorLines.Count -gt 0) {
+            $lblStatus.Text = "Partial success: $($sum.Created) created; see dialog for errors."
+            [System.Windows.MessageBox]::Show(
+                ($sum.ErrorLines -join "`r`n"), 'Relationship create', 'OK', 'Warning') | Out-Null
+        } else {
+            $detail = if ($sum.ErrorLines.Count -gt 0) { $sum.ErrorLines -join "`r`n" } else { 'No success entries returned.' }
+            $lblStatus.Text = 'Relationship was not created.'
+            [System.Windows.MessageBox]::Show(
+                $detail, 'Relationship create', 'OK', 'Warning') | Out-Null
+        }
+    } catch {
+        $lblStatus.Text = "Create failed: $($_.Exception.Message)"
+        [System.Windows.MessageBox]::Show(
+            $_.Exception.Message, 'Relationship create', 'OK', 'Error') | Out-Null
+    }
+    $btnRelCreateRelationship.IsEnabled = $true
+    Update-RelCreateUiState
+    $tbRelScanInput.Focus()
+})
+
+$tcRelationships.Add_SelectionChanged({
+    if ($tcRelationships.SelectedItem -eq $tabRelCreateInner) {
+        if ((Test-TokenValid -or (Test-RefreshTokenPresent)) -and $cbRelType.Items.Count -eq 0) {
+            try {
+                Refresh-RelationshipTypeCombo
+            } catch {
+                $lblStatus.Text = "Could not load relationship types: $($_.Exception.Message)"
+            }
+        }
+        Update-RelCreateUiState
+    }
 })
 #endregion
 
@@ -3780,7 +4504,20 @@ $tabControl.Add_SelectionChanged({
             } catch {
                 $lblStatus.Text = "Could not load end users: $($_.Exception.Message)"
             }
+            Update-ScanState
             $tbScanInput.Focus()
+        }
+    }
+    elseif ($tab -eq $tabRelationships) {
+        if (Test-TokenValid -or (Test-RefreshTokenPresent)) {
+            try {
+                if ($cbRelType.Items.Count -eq 0) {
+                    Refresh-RelationshipTypeCombo
+                }
+            } catch {
+                $lblStatus.Text = "Could not load relationship types: $($_.Exception.Message)"
+            }
+            $tbRelScanInput.Focus()
         }
     }
 })
@@ -3798,6 +4535,7 @@ $window.Add_Activated({
         -and -not $expSettings.IsExpanded) {
         $tab = $tabControl.SelectedItem
         if ($tab -eq $tabScan) { $tbScanInput.Focus() }
+        elseif ($tab -eq $tabRelationships) { $tbRelScanInput.Focus() }
     }
 })
 
