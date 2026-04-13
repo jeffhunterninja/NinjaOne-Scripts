@@ -1,0 +1,2 @@
+DeviceType,Name,RoleName,OrganizationName,LocationName,Make,Model,SerialNumber,PurchaseDate,PurchaseAmount,WarrantyStartDate,WarrantyEndDate,AssetStatus,ExpectedLifetime,EndOfLifeDate
+Unmanaged,"Dell Dock","Dock","Globex Corporation","Training Center","Dell","WD19","TL-001","2024-01-15",1250.00,"2024-01-15","2027-01-15","Inventory","5 years","2029-01-15"
