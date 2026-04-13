@@ -101,8 +101,9 @@ $script:AllowInsecureHttp = $AllowInsecureHttp.IsPresent
 
 $script:RelationshipCsvData   = $null
 $script:RelationshipTypeCache = $null
-$script:RelSourceDevice      = $null
-$script:RelTargetDevice      = $null
+$script:RelationshipRows      = [System.Collections.Generic.List[PSCustomObject]]::new()
+$script:RelationshipRowSeed   = 0
+$script:RelCompletedRows      = @{}
 
 $script:MasterPassword   = $null
 $script:MasterPasswordVerifier = $null
@@ -858,6 +859,43 @@ function Get-QrPngBytesFromItamDashUrl {
     return $bytes
 }
 
+function Remove-UnicodeBidiControlChars {
+    param([Parameter(Mandatory)][string]$Text)
+    if ([string]::IsNullOrEmpty($Text)) { return $Text }
+    return [regex]::Replace($Text, '[\u202A-\u202E\u2066-\u2069]', '')
+}
+
+function Get-AspectFitRectangle {
+    param(
+        [Parameter(Mandatory)][int]$SourceWidth,
+        [Parameter(Mandatory)][int]$SourceHeight,
+        [Parameter(Mandatory)][System.Drawing.Rectangle]$Bounds
+    )
+    if ($SourceWidth -le 0 -or $SourceHeight -le 0) {
+        return [System.Drawing.RectangleF]::new(
+            [single]$Bounds.Left, [single]$Bounds.Top, [single]$Bounds.Width, [single]$Bounds.Height)
+    }
+    if ($Bounds.Width -le 0 -or $Bounds.Height -le 0) {
+        return [System.Drawing.RectangleF]::new(
+            [single]$Bounds.Left, [single]$Bounds.Top, [single]$Bounds.Width, [single]$Bounds.Height)
+    }
+
+    $sourceRatio = [double]$SourceWidth / [double]$SourceHeight
+    $boundsRatio = [double]$Bounds.Width / [double]$Bounds.Height
+    $fitW = [double]$Bounds.Width
+    $fitH = [double]$Bounds.Height
+
+    if ($sourceRatio -gt $boundsRatio) {
+        $fitH = $fitW / $sourceRatio
+    } else {
+        $fitW = $fitH * $sourceRatio
+    }
+
+    $fitX = [double]$Bounds.Left + (($Bounds.Width - $fitW) / 2.0)
+    $fitY = [double]$Bounds.Top + (($Bounds.Height - $fitH) / 2.0)
+    return [System.Drawing.RectangleF]::new([single]$fitX, [single]$fitY, [single]$fitW, [single]$fitH)
+}
+
 function New-AssetLabelBitmap {
     param(
         [Parameter(Mandatory)][string]$AssetId,
@@ -875,42 +913,80 @@ function New-AssetLabelBitmap {
     $bmp.SetResolution($Dpi, $Dpi)
     $g = [System.Drawing.Graphics]::FromImage($bmp)
     $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+    $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAlias
     $g.Clear([System.Drawing.Color]::White)
 
     $ms = New-Object System.IO.MemoryStream(,$QrPngBytes)
     $qrImg = $null
-    $font = $null
+    $titleFont = $null
+    $idFont = $null
     $sf = $null
     try {
         $qrImg = [System.Drawing.Image]::FromStream($ms)
 
-        $pad = [int]([Math]::Max(2, [Math]::Min($wPx, $hPx) * 0.04))
+        $pad = [int]([Math]::Max(3, [Math]::Min($wPx, $hPx) * 0.055))
         $innerW = $wPx - 2 * $pad
         $innerH = $hPx - 2 * $pad
-        $leftZoneW = [int]($innerW * 0.48)
+        $leftZoneW = [int]($innerW * 0.46)
         $qrSide = [int][Math]::Min($leftZoneW, $innerH)
         $qrX = $pad + [int](($leftZoneW - $qrSide) / 2)
         $qrY = $pad + [int](($innerH - $qrSide) / 2)
-        $g.DrawImage($qrImg, $qrX, $qrY, $qrSide, $qrSide)
+        $savedInterpolation = $g.InterpolationMode
+        $savedPixelOffset = $g.PixelOffsetMode
+        try {
+            # Keep QR modules square/crisp when scaling into the label.
+            $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::NearestNeighbor
+            $g.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::Half
+            $g.DrawImage($qrImg, $qrX, $qrY, $qrSide, $qrSide)
+        } finally {
+            $g.InterpolationMode = $savedInterpolation
+            $g.PixelOffsetMode = $savedPixelOffset
+        }
 
         $textX = $pad + $leftZoneW + $pad
         $textW = $wPx - $textX - $pad
         $textH = $hPx - 2 * $pad
-        $fontPt = [Math]::Max(7.0, [Math]::Min(22.0, $textH * 72.0 / $Dpi / 5.0))
-        $font = New-Object System.Drawing.Font(
-            'Segoe UI', [single]$fontPt, [System.Drawing.FontStyle]::Bold, [System.Drawing.GraphicsUnit]::Point)
+        $idFontPt = [Math]::Max(8.0, [Math]::Min(24.0, $textH * 72.0 / $Dpi / 4.2))
+        $titleFontPt = [Math]::Max(6.5, [Math]::Min(14.0, $idFontPt * 0.72))
+        $titleFont = New-Object System.Drawing.Font(
+            'Segoe UI', [single]$titleFontPt, [System.Drawing.FontStyle]::Bold, [System.Drawing.GraphicsUnit]::Point)
+        $idFont = New-Object System.Drawing.Font(
+            'Segoe UI', [single]$idFontPt, [System.Drawing.FontStyle]::Bold, [System.Drawing.GraphicsUnit]::Point)
         $brush = [System.Drawing.Brushes]::Black
-        $sf = New-Object System.Drawing.StringFormat
+        $sf = [System.Drawing.StringFormat]::GenericTypographic.Clone()
         $sf.Alignment = [System.Drawing.StringAlignment]::Near
-        $sf.LineAlignment = [System.Drawing.StringAlignment]::Center
         $sf.Trimming = [System.Drawing.StringTrimming]::EllipsisCharacter
-        $rect = New-Object System.Drawing.RectangleF(
-            [single]$textX, [single]$pad, [single]$textW, [single]$textH)
-        $labelText = "Asset ID`r`n$AssetId"
-        $g.DrawString($labelText, $font, $brush, $rect, $sf)
+        $sf.HotkeyPrefix = [System.Drawing.Text.HotkeyPrefix]::None
+        $rtlMask = -bnot [int][System.Drawing.StringFormatFlags]::DirectionRightToLeft
+        $sf.FormatFlags = [int]$sf.FormatFlags -band $rtlMask
+
+        $idDisplay = Remove-UnicodeBidiControlChars -Text $AssetId
+        try {
+            $idDisplay = $idDisplay.Normalize([System.Text.NormalizationForm]::FormC)
+        } catch { }
+
+        $titleH = [single]($textH * 0.36)
+        $idTop = [single]$pad + $titleH
+        $idH = [single]$textH - $titleH
+        $rectTitle = New-Object System.Drawing.RectangleF(
+            [single]$textX, [single]$pad, [single]$textW, $titleH)
+        $rectId = New-Object System.Drawing.RectangleF(
+            [single]$textX, $idTop, [single]$textW, $idH)
+
+        $gSave = $g.Save()
+        try {
+            $g.ResetTransform()
+            $sf.LineAlignment = [System.Drawing.StringAlignment]::Far
+            $g.DrawString('Asset ID', $titleFont, $brush, $rectTitle, $sf)
+            $sf.LineAlignment = [System.Drawing.StringAlignment]::Near
+            $g.DrawString($idDisplay, $idFont, $brush, $rectId, $sf)
+        } finally {
+            $g.Restore($gSave)
+        }
     } finally {
         if ($sf) { $sf.Dispose() }
-        if ($font) { $font.Dispose() }
+        if ($titleFont) { $titleFont.Dispose() }
+        if ($idFont) { $idFont.Dispose() }
         if ($qrImg) { $qrImg.Dispose() }
         $ms.Dispose()
         $g.Dispose()
@@ -1803,7 +1879,7 @@ $xaml = @"
           </Grid>
 
           <TextBlock Grid.Row="6" TextWrapping="Wrap" Foreground="Gray" FontSize="11" Margin="0,0,0,8"
-                     Text="Match width/height to the loaded roll (e.g. Brother QL). Select the same media in Windows printer properties if labels misfeed."/>
+                     Text="Match width/height to the loaded roll (e.g. Brother QL-810W). Use the same media in Windows printer properties if labels misfeed. If physical output looks mirrored vs Print to PDF, check mirror/flip and orientation in the printer driver."/>
 
           <Grid Grid.Row="7">
             <Grid.RowDefinitions>
@@ -1915,53 +1991,72 @@ $xaml = @"
                            Text="Required columns: RelationshipTypeId (integer from relationship types API). For each side use SourceDeviceId or SourceItamAssetId, and TargetDeviceId or TargetItamAssetId. OAuth app needs access to ITAM asset-relationship endpoints (Ninja 13+)."/>
               </Grid>
             </TabItem>
-            <TabItem Header="Create between devices" x:Name="tabRelCreateInner">
+            <TabItem Header="Bulk relationship builder" x:Name="tabRelBuilderInner">
               <Grid Margin="8">
                 <Grid.RowDefinitions>
                   <RowDefinition Height="Auto"/>
                   <RowDefinition Height="Auto"/>
-                  <RowDefinition Height="Auto"/>
-                  <RowDefinition Height="Auto"/>
-                  <RowDefinition Height="Auto"/>
-                  <RowDefinition Height="Auto"/>
                   <RowDefinition Height="*"/>
+                  <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
                 <DockPanel Grid.Row="0" Margin="0,0,0,8">
                   <Button x:Name="btnRelRefreshTypes" Content="Refresh types" DockPanel.Dock="Right" Width="120" Margin="8,0,0,0"/>
-                  <ComboBox x:Name="cbRelType" Height="28" VerticalContentAlignment="Center"
-                            DisplayMemberPath="Display" SelectedValuePath="Id"
-                            ToolTip="Relationship type (from GET /api/v2/itam/asset-relationship/types)"/>
+                  <TextBlock VerticalAlignment="Center" Foreground="Gray"
+                             Text="Refresh relationship labels if your schema changed."/>
                 </DockPanel>
-                <GroupBox Grid.Row="1" Header="Scanner" Margin="0,0,0,8">
+                <GroupBox Grid.Row="1" Header="Defaults and pre-populate" Margin="0,0,0,8">
                   <StackPanel Margin="4">
                     <TextBlock TextWrapping="Wrap" Foreground="Gray" Margin="0,0,0,6"
-                               Text="Focus the field below, scan or paste a device / ITAM asset URL, press Enter. Choose which endpoint the scan applies to."/>
+                               Text="New rows inherit these defaults. You can edit each row before submit."/>
                     <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
-                      <RadioButton x:Name="rbRelScanSource" Content="Next scan sets source" IsChecked="True" Margin="0,0,16,0"/>
-                      <RadioButton x:Name="rbRelScanTarget" Content="Next scan sets target"/>
+                      <TextBlock VerticalAlignment="Center" Text="Left:" Margin="0,0,4,0"/>
+                      <ComboBox x:Name="cbRelTemplateSourceType" Width="110" Height="28" DisplayMemberPath="Display" SelectedValuePath="Value"/>
+                      <TextBox x:Name="tbRelTemplateSourceValue" Width="220" Height="28" Margin="6,0,12,0"
+                               ToolTip="ID or URL for left entity"/>
+                      <TextBlock VerticalAlignment="Center" Text="Relationship:" Margin="0,0,4,0"/>
+                      <ComboBox x:Name="cbRelTemplateType" Width="260" Height="28" DisplayMemberPath="Display" SelectedValuePath="Id"/>
                     </StackPanel>
-                    <TextBox x:Name="tbRelScanInput" Height="28" FontSize="12" VerticalContentAlignment="Center"
-                             ToolTip="Scan device dashboard or ITAM asset QR, then Enter"/>
+                    <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
+                      <TextBlock VerticalAlignment="Center" Text="Right:" Margin="0,0,4,0"/>
+                      <ComboBox x:Name="cbRelTemplateTargetType" Width="110" Height="28" DisplayMemberPath="Display" SelectedValuePath="Value"/>
+                      <TextBox x:Name="tbRelTemplateTargetValue" Width="220" Height="28" Margin="6,0,12,0"
+                               ToolTip="ID or URL for right entity"/>
+                      <Button x:Name="btnRelAddRow" Content="Add row" Width="95" Margin="0,0,8,0"/>
+                      <Button x:Name="btnRelDuplicateRows" Content="Duplicate selected" Width="130" Margin="0,0,8,0"/>
+                      <Button x:Name="btnRelRemoveRows" Content="Remove selected" Width="120"/>
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal">
+                      <TextBlock VerticalAlignment="Center" Text="Pre-populate from user:" Margin="0,0,4,0"/>
+                      <ComboBox x:Name="cbRelPreUser" IsEditable="True" IsTextSearchEnabled="False"
+                                Width="290" Height="28" DisplayMemberPath="Display"/>
+                      <Button x:Name="btnRelPreloadForUser" Content="Load assigned devices" Width="150" Margin="8,0,0,0"/>
+                    </StackPanel>
                   </StackPanel>
                 </GroupBox>
-                <GroupBox Grid.Row="2" Header="Source device" Margin="0,0,0,8">
-                  <DockPanel Margin="4">
-                    <Button x:Name="btnRelClearSource" Content="Clear" DockPanel.Dock="Right" Width="70"/>
-                    <TextBlock x:Name="lblRelSourceInfo" TextWrapping="Wrap" Foreground="Gray"
-                               Text="Not set."/>
-                  </DockPanel>
-                </GroupBox>
-                <GroupBox Grid.Row="3" Header="Target device" Margin="0,0,0,8">
-                  <DockPanel Margin="4">
-                    <Button x:Name="btnRelClearTarget" Content="Clear" DockPanel.Dock="Right" Width="70"/>
-                    <TextBlock x:Name="lblRelTargetInfo" TextWrapping="Wrap" Foreground="Gray"
-                               Text="Not set."/>
-                  </DockPanel>
-                </GroupBox>
-                <Button x:Name="btnRelCreateRelationship" Grid.Row="4" Content="Create relationship"
-                        HorizontalAlignment="Left" FontWeight="SemiBold" IsEnabled="False" Margin="0,0,0,8"/>
-                <TextBlock Grid.Row="5" TextWrapping="Wrap" Foreground="Gray"
-                           Text="Uses POST /api/v2/itam/asset-relationship with entity type DEVICE. Device must exist in NinjaOne; ITAM asset id is shown when present in custom fields."/>
+                <DataGrid x:Name="dgRelRows" Grid.Row="2" AutoGenerateColumns="False" Margin="0,0,0,8"
+                          CanUserAddRows="False" CanUserDeleteRows="False" SelectionMode="Extended" SelectionUnit="FullRow">
+                  <DataGrid.Columns>
+                    <DataGridTextColumn Header="Row" Binding="{Binding RowId}" IsReadOnly="True" Width="60"/>
+                    <DataGridComboBoxColumn Header="Left Type" SelectedValueBinding="{Binding SourceType, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                            SelectedValuePath="Value" DisplayMemberPath="Display" Width="110"
+                                            ItemsSource="{Binding RelativeSource={RelativeSource AncestorType=DataGrid}, Path=Tag}"/>
+                    <DataGridTextColumn Header="Left Value (ID or URL)" Binding="{Binding SourceRef, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="2*"/>
+                    <DataGridComboBoxColumn Header="Relationship Type Id" SelectedValueBinding="{Binding RelationshipTypeId, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                            SelectedValuePath="Id" DisplayMemberPath="Display" Width="2*"
+                                            ItemsSource="{Binding ElementName=cbRelTemplateType, Path=ItemsSource}"/>
+                    <DataGridComboBoxColumn Header="Right Type" SelectedValueBinding="{Binding TargetType, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                            SelectedValuePath="Value" DisplayMemberPath="Display" Width="110"
+                                            ItemsSource="{Binding RelativeSource={RelativeSource AncestorType=DataGrid}, Path=Tag}"/>
+                    <DataGridTextColumn Header="Right Value (ID or URL)" Binding="{Binding TargetRef, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="2*"/>
+                    <DataGridTextColumn Header="Validation" Binding="{Binding Validation}" IsReadOnly="True" Width="2*"/>
+                    <DataGridTextColumn Header="Status" Binding="{Binding Status}" IsReadOnly="True" Width="140"/>
+                  </DataGrid.Columns>
+                </DataGrid>
+                <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Left">
+                  <Button x:Name="btnRelValidateRows" Content="Validate rows" Width="110" Margin="0,0,8,0"/>
+                  <Button x:Name="btnRelCreateRows" Content="Create relationships" Width="145" FontWeight="SemiBold" Margin="0,0,8,0"/>
+                  <Button x:Name="btnRelClearCompleted" Content="Clear completed rows" Width="150"/>
+                </StackPanel>
               </Grid>
             </TabItem>
           </TabControl>
@@ -2088,17 +2183,22 @@ $tbRelCsvPath        = $window.FindName('tbRelCsvPath')
 $btnRelBrowseCsv     = $window.FindName('btnRelBrowseCsv')
 $dgRelCsvPreview     = $window.FindName('dgRelCsvPreview')
 $btnRelImportCsv     = $window.FindName('btnRelImportCsv')
-$tabRelCreateInner   = $window.FindName('tabRelCreateInner')
-$cbRelType           = $window.FindName('cbRelType')
+$tabRelBuilderInner  = $window.FindName('tabRelBuilderInner')
 $btnRelRefreshTypes  = $window.FindName('btnRelRefreshTypes')
-$rbRelScanSource     = $window.FindName('rbRelScanSource')
-$rbRelScanTarget     = $window.FindName('rbRelScanTarget')
-$tbRelScanInput      = $window.FindName('tbRelScanInput')
-$lblRelSourceInfo    = $window.FindName('lblRelSourceInfo')
-$lblRelTargetInfo    = $window.FindName('lblRelTargetInfo')
-$btnRelClearSource   = $window.FindName('btnRelClearSource')
-$btnRelClearTarget   = $window.FindName('btnRelClearTarget')
-$btnRelCreateRelationship = $window.FindName('btnRelCreateRelationship')
+$cbRelTemplateSourceType = $window.FindName('cbRelTemplateSourceType')
+$tbRelTemplateSourceValue = $window.FindName('tbRelTemplateSourceValue')
+$cbRelTemplateType = $window.FindName('cbRelTemplateType')
+$cbRelTemplateTargetType = $window.FindName('cbRelTemplateTargetType')
+$tbRelTemplateTargetValue = $window.FindName('tbRelTemplateTargetValue')
+$cbRelPreUser = $window.FindName('cbRelPreUser')
+$btnRelPreloadForUser = $window.FindName('btnRelPreloadForUser')
+$btnRelAddRow = $window.FindName('btnRelAddRow')
+$btnRelDuplicateRows = $window.FindName('btnRelDuplicateRows')
+$btnRelRemoveRows = $window.FindName('btnRelRemoveRows')
+$btnRelValidateRows = $window.FindName('btnRelValidateRows')
+$btnRelCreateRows = $window.FindName('btnRelCreateRows')
+$btnRelClearCompleted = $window.FindName('btnRelClearCompleted')
+$dgRelRows = $window.FindName('dgRelRows')
 #endregion
 
 #region Initialize Defaults
@@ -2151,9 +2251,15 @@ foreach ($yr in @('1 years', '2 years', '3 years', '4 years', '5 years')) {
 #region UI Helpers
 function Push-UIUpdate {
     $frame = [System.Windows.Threading.DispatcherFrame]::new()
-    [System.Windows.Threading.Dispatcher]::CurrentDispatcher.BeginInvoke(
+    $cb = [System.Windows.Threading.DispatcherOperationCallback]{
+        param([object]$state)
+        ([System.Windows.Threading.DispatcherFrame]$state).Continue = $false
+        return $null
+    }
+    [void][System.Windows.Threading.Dispatcher]::CurrentDispatcher.BeginInvoke(
         [System.Windows.Threading.DispatcherPriority]::Background,
-        [Action]{ $frame.Continue = $false }
+        $cb,
+        $frame
     )
     [System.Windows.Threading.Dispatcher]::PushFrame($frame)
 }
@@ -2169,34 +2275,460 @@ function Format-ScanUserDisplay {
     return $display
 }
 
-function Set-RelEndpointLabels {
-    param(
-        [object]$Device,
-        [Parameter(Mandatory)][bool]$IsSource
+function Get-RelationshipEntityTypeItems {
+    return @(
+        [PSCustomObject]@{ Display = 'Device'; Value = 'DEVICE' },
+        [PSCustomObject]@{ Display = 'Asset';  Value = 'ASSET' },
+        [PSCustomObject]@{ Display = 'User';   Value = 'USER' }
     )
-    $tb = if ($IsSource) { $lblRelSourceInfo } else { $lblRelTargetInfo }
-    if (-not $Device) {
-        $tb.Text = 'Not set.'
-        return
-    }
-    $line = "Device ID: $($Device.Id)  |  $($Device.Name)"
-    if (-not [string]::IsNullOrWhiteSpace($Device.ItamAssetId)) {
-        $line += "  |  ITAM: $($Device.ItamAssetId)"
-    } else {
-        $line += '  |  (no itamAssetId in custom fields yet)'
-    }
-    $tb.Text = $line
 }
 
-function Update-RelCreateUiState {
-    $srcOk  = $null -ne $script:RelSourceDevice
-    $tgtOk  = $null -ne $script:RelTargetDevice
-    $typeOk = ($null -ne $cbRelType.SelectedItem)
-    $btnRelCreateRelationship.IsEnabled = ($srcOk -and $tgtOk -and $typeOk)
+function Get-RelationshipTypeDisplay {
+    param([int]$TypeId)
+    foreach ($item in @($cbRelTemplateType.Items)) {
+        if ([int]$item.Id -eq $TypeId) { return [string]$item.Display }
+    }
+    return "Relationship type id $TypeId"
+}
+
+function Update-RelBuilderUiState {
+    $count = $script:RelationshipRows.Count
+    $selectedCount = @($dgRelRows.SelectedItems).Count
+    $btnRelDuplicateRows.IsEnabled = ($selectedCount -gt 0)
+    $btnRelRemoveRows.IsEnabled = ($selectedCount -gt 0)
+    $btnRelValidateRows.IsEnabled = ($count -gt 0)
+    $btnRelCreateRows.IsEnabled = ($count -gt 0)
+    $btnRelClearCompleted.IsEnabled = ($script:RelCompletedRows.Keys.Count -gt 0)
+}
+
+function Initialize-RelationshipBuilderControls {
+    $entityTypes = @(Get-RelationshipEntityTypeItems)
+    $cbRelTemplateSourceType.ItemsSource = $entityTypes
+    $cbRelTemplateTargetType.ItemsSource = $entityTypes
+    $cbRelTemplateSourceType.SelectedValue = 'DEVICE'
+    $cbRelTemplateTargetType.SelectedValue = 'DEVICE'
+    $dgRelRows.Tag = $entityTypes
+    $dgRelRows.ItemsSource = $script:RelationshipRows
+    Update-RelBuilderUiState
+}
+
+function New-RelationshipBuilderRow {
+    param(
+        [string]$SourceType = $null,
+        [string]$SourceRef = $null,
+        [int]$RelationshipTypeId = 0,
+        [string]$TargetType = $null,
+        [string]$TargetRef = $null
+    )
+    $script:RelationshipRowSeed++
+    if ([string]::IsNullOrWhiteSpace($SourceType)) { $SourceType = [string]$cbRelTemplateSourceType.SelectedValue }
+    if ([string]::IsNullOrWhiteSpace($TargetType)) { $TargetType = [string]$cbRelTemplateTargetType.SelectedValue }
+    if ($RelationshipTypeId -le 0 -and $null -ne $cbRelTemplateType.SelectedItem) {
+        $RelationshipTypeId = [int]$cbRelTemplateType.SelectedItem.Id
+    }
+    return [PSCustomObject]@{
+        RowId               = $script:RelationshipRowSeed
+        SourceType          = $SourceType
+        SourceRef           = if ($SourceRef) { $SourceRef } else { $tbRelTemplateSourceValue.Text.Trim() }
+        RelationshipTypeId  = $RelationshipTypeId
+        TargetType          = $TargetType
+        TargetRef           = if ($TargetRef) { $TargetRef } else { $tbRelTemplateTargetValue.Text.Trim() }
+        Validation          = ''
+        Status              = 'Draft'
+    }
+}
+
+function Refresh-RelationshipRowsGrid {
+    $dgRelRows.ItemsSource = $null
+    $dgRelRows.ItemsSource = $script:RelationshipRows
+    Update-RelBuilderUiState
+}
+
+function Resolve-RelationshipEntityInput {
+    param(
+        [Parameter(Mandatory)][string]$EntityType,
+        [Parameter(Mandatory)][string]$InputText
+    )
+    $raw = $InputText.Trim()
+    if ([string]::IsNullOrWhiteSpace($raw)) { throw 'Value is required.' }
+    switch ($EntityType.ToUpperInvariant()) {
+        'DEVICE' {
+            if ($raw -match '^\d+$') {
+                return [PSCustomObject]@{ EntityType = 'DEVICE'; EntityId = [int]$raw; Display = "Device $raw" }
+            }
+            $qr = Get-QRData -Text $raw
+            if ($qr) {
+                if ($qr.Type -eq 'user') { throw 'Device value cannot be a user URL.' }
+                if ($qr.ContainsKey('ItamAssetId')) {
+                    $devId = Resolve-DeviceIdFromItamAssetId -ItamAssetId ([string]$qr['ItamAssetId'])
+                    return [PSCustomObject]@{ EntityType = 'DEVICE'; EntityId = [int]$devId; Display = "Device $devId" }
+                }
+                if ($qr.ContainsKey('Id') -and $null -ne $qr.Id) {
+                    return [PSCustomObject]@{ EntityType = 'DEVICE'; EntityId = [int]$qr.Id; Display = "Device $($qr.Id)" }
+                }
+            }
+            throw 'Device value must be numeric id, device URL, or asset URL with assetId.'
+        }
+        'ASSET' {
+            if ($raw -match '[?&]assetId=([^&#]+)') {
+                try { $raw = [uri]::UnescapeDataString($Matches[1]) } catch { $raw = $Matches[1] }
+            }
+            return [PSCustomObject]@{ EntityType = 'ASSET'; EntityId = $raw; Display = "Asset $raw" }
+        }
+        'USER' {
+            if ($raw -match '^\d+$') {
+                $u = Find-UserById -UserId ([int]$raw)
+                if ($u) {
+                    return [PSCustomObject]@{ EntityType = 'USER'; EntityId = [int]$u.Id; Display = $u.Name }
+                }
+                return [PSCustomObject]@{ EntityType = 'USER'; EntityId = [int]$raw; Display = "User $raw" }
+            }
+            $qr = Get-QRData -Text $raw
+            if ($qr -and $qr.Type -eq 'user' -and $null -ne $qr.Id) {
+                $u = Find-UserById -UserId ([int]$qr.Id)
+                $label = if ($u) { $u.Name } else { "User $($qr.Id)" }
+                return [PSCustomObject]@{ EntityType = 'USER'; EntityId = [int]$qr.Id; Display = $label }
+            }
+            $match = @(Get-ScanUserMatches -SearchText $raw -MaxResults 1) | Select-Object -First 1
+            if ($match) {
+                return [PSCustomObject]@{ EntityType = 'USER'; EntityId = [int]$match.Id; Display = $match.Display }
+            }
+            throw "Could not resolve user from '$raw'."
+        }
+        default { throw "Unsupported entity type '$EntityType'." }
+    }
+}
+
+function Validate-RelationshipBuilderRow {
+    param([Parameter(Mandatory)]$Row)
+    try {
+        $srcType = ConvertTo-ScalarString -Value $Row.SourceType
+        $tgtType = ConvertTo-ScalarString -Value $Row.TargetType
+        if (-not $srcType -or -not $tgtType) { throw 'Both entity types are required.' }
+        $relTypeId = [int]$Row.RelationshipTypeId
+        if ($relTypeId -le 0) { throw 'Relationship type is required.' }
+        $src = Resolve-RelationshipEntityInput -EntityType $srcType -InputText ([string]$Row.SourceRef)
+        $tgt = Resolve-RelationshipEntityInput -EntityType $tgtType -InputText ([string]$Row.TargetRef)
+        if ($src.EntityType -eq $tgt.EntityType -and $src.EntityId.ToString() -eq $tgt.EntityId.ToString()) {
+            throw 'Source and target cannot be identical.'
+        }
+        return [PSCustomObject]@{
+            IsValid = $true
+            Message = "Ready"
+            Request = @{
+                sourceId           = $src.EntityId
+                sourceType         = $src.EntityType
+                targetId           = $tgt.EntityId
+                targetType         = $tgt.EntityType
+                relationshipTypeId = $relTypeId
+            }
+        }
+    } catch {
+        return [PSCustomObject]@{
+            IsValid = $false
+            Message = $_.Exception.Message
+            Request = $null
+        }
+    }
+}
+
+function Validate-RelationshipBuilderRows {
+    $validRows = [System.Collections.Generic.List[object]]::new()
+    foreach ($row in @($script:RelationshipRows)) {
+        $res = Validate-RelationshipBuilderRow -Row $row
+        $row.Validation = $res.Message
+        if ($res.IsValid) {
+            $row.Status = 'Validated'
+            $validRows.Add([PSCustomObject]@{ Row = $row; Request = $res.Request }) | Out-Null
+        } else {
+            $row.Status = 'Invalid'
+        }
+    }
+    Refresh-RelationshipRowsGrid
+    return @($validRows)
+}
+
+function Try-ResolveRelationshipPreUser {
+    param([string]$InputText)
+    $typed = if ($InputText) { $InputText.Trim() } else { '' }
+    if ([string]::IsNullOrWhiteSpace($typed)) { return $null }
+    if ($typed -match '^\d+$') { return (Find-UserById -UserId ([int]$typed)) }
+    $qr = Get-QRData -Text $typed
+    if ($qr -and $qr.Type -eq 'user') { return (Find-UserById -UserId ([int]$qr.Id)) }
+    return (@(Get-ScanUserMatches -SearchText $typed -MaxResults 1) | Select-Object -First 1)
+}
+
+function Add-RelationshipUserRefsFromValue {
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][System.Collections.Generic.HashSet[string]]$Set,
+        $Value
+    )
+    if ($null -eq $Value) { return }
+    if ($Value -is [System.Array]) {
+        foreach ($item in $Value) {
+            Add-RelationshipUserRefsFromValue -Set $Set -Value $item
+        }
+        return
+    }
+    if ($Value -is [PSCustomObject] -or $Value -is [System.Collections.IDictionary]) {
+        foreach ($propName in @(
+                'uid', 'userUid', 'assignedUserUid', 'ownerUid', 'assignedOwnerUid',
+                'id', 'userId', 'assignedUserId', 'ownerId', 'assignedOwnerId', 'value'
+            )) {
+            $propValue = $null
+            if ($Value -is [System.Collections.IDictionary]) {
+                if ($Value.Contains($propName)) { $propValue = $Value[$propName] }
+            } else {
+                $prop = $Value.PSObject.Properties[$propName]
+                if ($prop) { $propValue = $prop.Value }
+            }
+            if ($null -ne $propValue) {
+                Add-RelationshipUserRefsFromValue -Set $Set -Value $propValue
+            }
+        }
+        return
+    }
+    $s = ConvertTo-ScalarString -Value $Value
+    if (-not [string]::IsNullOrWhiteSpace($s)) {
+        [void]$Set.Add($s.Trim())
+    }
+}
+
+function Get-RelationshipDeviceUserRefs {
+    param([Parameter(Mandatory)]$DeviceObject)
+    $refs = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($flatName in @(
+            'ownerUid', 'assignedUserUid', 'assignedOwnerUid',
+            'ownerId', 'assignedUserId', 'assignedOwnerId',
+            'userUid', 'userId', 'assignedToUid', 'assignedToId'
+        )) {
+        $prop = $DeviceObject.PSObject.Properties[$flatName]
+        if ($prop -and $null -ne $prop.Value) {
+            Add-RelationshipUserRefsFromValue -Set $refs -Value $prop.Value
+        }
+    }
+    foreach ($objName in @(
+            'owner', 'assignedUser', 'assignedTo', 'primaryUser',
+            'user', 'endUser', 'contact', 'userInfo', 'ownerInfo', 'assignedOwner'
+        )) {
+        $prop = $DeviceObject.PSObject.Properties[$objName]
+        if ($prop -and $null -ne $prop.Value) {
+            Add-RelationshipUserRefsFromValue -Set $refs -Value $prop.Value
+        }
+    }
+    return @($refs)
+}
+
+function New-RelationshipMatchKeySet {
+    param(
+        [string]$UserUid,
+        [int]$UserId,
+        [string]$UserEmail
+    )
+    $set = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    if (-not [string]::IsNullOrWhiteSpace($UserUid)) {
+        [void]$set.Add($UserUid.Trim())
+    }
+    if ($UserId -gt 0) {
+        [void]$set.Add(([string]$UserId))
+        try {
+            $resolved = Find-UserById -UserId $UserId
+            if ($resolved) {
+                if ($resolved.Uid) { [void]$set.Add(([string]$resolved.Uid).Trim()) }
+                if ($resolved.Id) { [void]$set.Add(([string]$resolved.Id).Trim()) }
+            }
+        } catch {
+            Write-Verbose "Relationship match-key user id lookup failed: $($_.Exception.Message)"
+        }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($UserEmail)) {
+        $targetEmail = $UserEmail.Trim()
+        foreach ($ep in @('users', 'contacts')) {
+            try {
+                $resp = Invoke-NinjaApi -Endpoint $ep
+                $items = @(ConvertTo-ListItems -Response $resp)
+                foreach ($u in $items) {
+                    $email = ConvertTo-ScalarString -Value $u.email
+                    if (-not $email) { continue }
+                    if (-not [string]::Equals($email, $targetEmail, [StringComparison]::OrdinalIgnoreCase)) { continue }
+                    $uid = ConvertTo-ScalarString -Value $u.uid
+                    $id = ConvertTo-ScalarString -Value $u.id
+                    if ($uid) { [void]$set.Add($uid.Trim()) }
+                    if ($id) { [void]$set.Add($id.Trim()) }
+                }
+            } catch {
+                Write-Verbose "Relationship match-key email lookup failed for '$ep': $($_.Exception.Message)"
+            }
+        }
+    }
+    return $set
+}
+
+function Test-RelationshipDeviceMatchesUser {
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][System.Collections.Generic.HashSet[string]]$MatchKeys,
+        [string[]]$Refs = @()
+    )
+    if ($null -eq $Refs -or $Refs.Count -eq 0) { return $false }
+    foreach ($r in @($Refs)) {
+        if ([string]::IsNullOrWhiteSpace($r)) { continue }
+        $refText = $r.Trim()
+        if ($MatchKeys.Contains($refText)) {
+            return $true
+        }
+        $tmp = 0
+        if ([int]::TryParse($refText, [ref]$tmp)) {
+            if ($MatchKeys.Contains(([string]$tmp))) { return $true }
+        }
+    }
+    return $false
+}
+
+function ConvertTo-RelationshipDeviceRow {
+    param([Parameter(Mandatory)]$DeviceObject)
+    if (-not $DeviceObject -or -not $DeviceObject.PSObject.Properties['id']) { return $null }
+    $devId = 0
+    if (-not [int]::TryParse($DeviceObject.id.ToString(), [ref]$devId) -or $devId -le 0) {
+        return $null
+    }
+    $displayNameProp = $DeviceObject.PSObject.Properties['displayName']
+    $systemNameProp  = $DeviceObject.PSObject.Properties['systemName']
+    $nameProp        = $DeviceObject.PSObject.Properties['name']
+    $name = if ($displayNameProp) { ConvertTo-ScalarString -Value $displayNameProp.Value } else { $null }
+    if (-not $name -and $systemNameProp) { $name = ConvertTo-ScalarString -Value $systemNameProp.Value }
+    if (-not $name -and $nameProp) { $name = ConvertTo-ScalarString -Value $nameProp.Value }
+    if (-not $name) { $name = "Device $devId" }
+    return [PSCustomObject]@{ Id = $devId; Name = $name; Raw = $DeviceObject }
+}
+
+function Get-RelationshipDeviceSeedRows {
+    $rows = [System.Collections.Generic.List[object]]::new()
+    $seen = @{}
+    foreach ($baseEp in @('devices-detailed?pageSize=500', 'devices?pageSize=500')) {
+        $after = $null
+        do {
+            $ep = $baseEp
+            if (-not [string]::IsNullOrWhiteSpace($after)) {
+                $ep += "&after=$([uri]::EscapeDataString($after))"
+            }
+            $resp = $null
+            try {
+                $resp = Invoke-NinjaApi -Endpoint $ep
+            } catch {
+                Write-Verbose "Relationship device seed query '$ep' failed: $($_.Exception.Message)"
+                break
+            }
+
+            $items = @()
+            if ($resp -is [Array]) {
+                $items = @($resp)
+            } elseif ($resp -and $resp.PSObject.Properties['results']) {
+                $items = @($resp.results)
+            } else {
+                $items = @(ConvertTo-ListItems -Response $resp)
+            }
+
+            foreach ($d in $items) {
+                $row = ConvertTo-RelationshipDeviceRow -DeviceObject $d
+                if (-not $row) { continue }
+                $devId = [int]$row.Id
+                if ($seen.ContainsKey($devId)) { continue }
+                $seen[$devId] = $true
+                $rows.Add($row) | Out-Null
+            }
+
+            $hasMore = $false
+            $nextCursor = $null
+            if ($resp -and $resp.PSObject.Properties['pageInfo'] -and $resp.pageInfo) {
+                if ($resp.pageInfo.PSObject.Properties['hasMore'] -and $resp.pageInfo.hasMore) {
+                    $hasMore = [bool]$resp.pageInfo.hasMore
+                }
+                if ($resp.pageInfo.PSObject.Properties['nextCursor'] -and $null -ne $resp.pageInfo.nextCursor) {
+                    $nextCursor = [string]$resp.pageInfo.nextCursor
+                }
+            }
+            if ($hasMore -and -not [string]::IsNullOrWhiteSpace($nextCursor)) {
+                $after = $nextCursor
+            } else {
+                $after = $null
+            }
+        } while ($after)
+    }
+    return @($rows | Sort-Object Name, Id -Unique)
+}
+
+function Get-DevicesAssignedToUserFastPass {
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][System.Collections.Generic.HashSet[string]]$MatchKeys
+    )
+    $seedRows = @(Get-RelationshipDeviceSeedRows)
+    $hits = [System.Collections.Generic.List[object]]::new()
+    foreach ($row in $seedRows) {
+        $refs = @(Get-RelationshipDeviceUserRefs -DeviceObject $row.Raw)
+        if (Test-RelationshipDeviceMatchesUser -MatchKeys $MatchKeys -Refs $refs) {
+            $hits.Add($row) | Out-Null
+        }
+    }
+    return [PSCustomObject]@{
+        Devices = @($hits | Sort-Object Name, Id -Unique)
+        SeedRows = @($seedRows)
+    }
+}
+
+function Get-DevicesAssignedToUserFallbackPass {
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][System.Collections.Generic.HashSet[string]]$MatchKeys,
+        [Parameter(Mandatory)][object[]]$SeedRows
+    )
+    $hits = [System.Collections.Generic.List[object]]::new()
+    foreach ($row in @($SeedRows)) {
+        try {
+            $ownerResp = Invoke-NinjaApi -Endpoint "device/$($row.Id)/owner"
+            $refs = @(Get-RelationshipDeviceUserRefs -DeviceObject $ownerResp)
+            if (Test-RelationshipDeviceMatchesUser -MatchKeys $MatchKeys -Refs $refs) {
+                $hits.Add($row) | Out-Null
+            }
+        } catch {
+            try {
+                $detail = Invoke-NinjaApi -Endpoint "device/$($row.Id)"
+                $refs = @(Get-RelationshipDeviceUserRefs -DeviceObject $detail)
+                if (Test-RelationshipDeviceMatchesUser -MatchKeys $MatchKeys -Refs $refs) {
+                    $hits.Add($row) | Out-Null
+                }
+            } catch {
+                Write-Verbose "Fallback lookup failed for device $($row.Id): $($_.Exception.Message)"
+            }
+        }
+    }
+    return @($hits | Sort-Object Name, Id -Unique)
+}
+
+function Get-DevicesAssignedToUser {
+    param(
+        [Parameter(Mandatory)][string]$UserUid,
+        [Parameter(Mandatory)][int]$UserId,
+        [string]$UserEmail = ''
+    )
+    $matchKeys = New-RelationshipMatchKeySet -UserUid $UserUid -UserId $UserId -UserEmail $UserEmail
+    $fast = Get-DevicesAssignedToUserFastPass -MatchKeys $matchKeys
+    $fastDevices = @($fast.Devices)
+    if ($fastDevices.Count -gt 0) {
+        return [PSCustomObject]@{
+            Devices = $fastDevices
+            UsedFallback = $false
+            SeedCount = @($fast.SeedRows).Count
+        }
+    }
+    $fallbackDevices = @(Get-DevicesAssignedToUserFallbackPass -MatchKeys $matchKeys -SeedRows @($fast.SeedRows))
+    return [PSCustomObject]@{
+        Devices = $fallbackDevices
+        UsedFallback = $true
+        SeedCount = @($fast.SeedRows).Count
+    }
 }
 
 function Refresh-RelationshipTypeCombo {
-    $cbRelType.Items.Clear()
+    $typeItems = [System.Collections.Generic.List[object]]::new()
     $lblStatus.Text = 'Loading relationship types...'
     Push-UIUpdate
     $types = Get-AllRelationshipTypes
@@ -2217,7 +2749,11 @@ function Refresh-RelationshipTypeCombo {
                 elseif ($fwd) { "$fwd (id $id)" }
                 elseif ($rev) { "$rev (id $id)" }
                 else { "Relationship type id $id" }
-        $cbRelType.Items.Add([PSCustomObject]@{ Display = $disp; Id = $id }) | Out-Null
+        $typeItems.Add([PSCustomObject]@{ Display = $disp; Id = $id }) | Out-Null
+    }
+    $cbRelTemplateType.ItemsSource = @($typeItems)
+    if ($cbRelTemplateType.Items.Count -gt 0 -and $null -eq $cbRelTemplateType.SelectedItem) {
+        $cbRelTemplateType.SelectedIndex = 0
     }
     $lblStatus.Text = "Loaded $($types.Count) relationship type(s)."
 }
@@ -2491,6 +3027,7 @@ $rbScanModeCheckIn.Add_Checked({
     $script:ScanCheckInMode = $true
     Update-ScanState
 })
+Initialize-RelationshipBuilderControls
 #endregion
 
 #region Sign-In (Authorization Code + PKCE)
@@ -2872,7 +3409,7 @@ $btnBrowseCsv.Add_Click({
     if ($dlg.ShowDialog()) {
         $tbCsvPath.Text = $dlg.FileName
         try {
-            $script:CsvData = Import-Csv -LiteralPath $dlg.FileName -Encoding UTF8
+            $script:CsvData = @(Import-Csv -LiteralPath $dlg.FileName -Encoding UTF8 | ForEach-Object { $_ })
             if ($script:CsvData -and $script:CsvData.Count -gt 0) {
                 # Bind the CSV rows directly; DataGrid will auto-generate columns
                 $dgCsvPreview.ItemsSource = $script:CsvData
@@ -3865,12 +4402,22 @@ $btnPrintLabels.Add_Click({
     }
 
     $printerName = $cbPrintPrinter.SelectedItem -as [string]
-    if ([string]::IsNullOrWhiteSpace($printerName) -or
-        -not [System.Drawing.Printing.PrinterSettings]::IsValidPrinterName($printerName)) {
+    if ([string]::IsNullOrWhiteSpace($printerName)) {
         $lblStatus.Text = 'Select a valid printer.'
         [System.Media.SystemSounds]::Hand.Play()
         return
     }
+    $printSettingsCheck = New-Object System.Drawing.Printing.PrinterSettings
+    $printSettingsCheck.PrinterName = $printerName
+    if (-not $printSettingsCheck.IsValid) {
+        $lblStatus.Text = 'Select a valid printer.'
+        [System.Media.SystemSounds]::Hand.Play()
+        return
+    }
+
+    # Leave app-side mirroring off by default. When a driver is already configured for mirror/flip,
+    # applying a second mirror here prints text/QR backward.
+    $mirrorBrotherOutput = $false
 
     $wCm = 0.0
     $hCm = 0.0
@@ -3936,12 +4483,64 @@ $btnPrintLabels.Add_Click({
         $script:_printLabelIndex = 0
         $printDoc = New-Object System.Drawing.Printing.PrintDocument
         $printDoc.PrinterSettings.PrinterName = $printerName
+
+        # Brother QL-810W (and similar): keep this minimal—custom paper, uniform scaling, and
+        # format changes have produced blank output while PDF remained correct.
         $printDoc.add_PrintPage({
             param($sender, $e)
             if ($script:_printLabelIndex -ge $script:_printLabelBitmaps.Count) { return }
             $bmp = $script:_printLabelBitmaps[$script:_printLabelIndex]
-            $r = $e.MarginBounds
-            $e.Graphics.DrawImage($bmp, $r)
+            $targetW100 = [double]$wCm / 2.54 * 100.0
+            $targetH100 = [double]$hCm / 2.54 * 100.0
+            $layoutBounds = if ($mirrorBrotherOutput) {
+                [System.Drawing.RectangleF]::new(
+                    [single]$e.PageBounds.Left, [single]$e.PageBounds.Top,
+                    [single]$e.PageBounds.Width, [single]$e.PageBounds.Height)
+            } else {
+                [System.Drawing.RectangleF]::new(
+                    [single]$e.MarginBounds.Left, [single]$e.MarginBounds.Top,
+                    [single]$e.MarginBounds.Width, [single]$e.MarginBounds.Height)
+            }
+            $drawW = [double]$targetW100
+            $drawH = [double]$targetH100
+            if ($drawW -le 0 -or $drawH -le 0) {
+                $drawW = [double]$layoutBounds.Width
+                $drawH = [double]$layoutBounds.Height
+            }
+            if ($drawW -gt $layoutBounds.Width -or $drawH -gt $layoutBounds.Height) {
+                $scale = [Math]::Min([double]$layoutBounds.Width / $drawW, [double]$layoutBounds.Height / $drawH)
+                $drawW = $drawW * $scale
+                $drawH = $drawH * $scale
+            }
+            $drawRect = [System.Drawing.RectangleF]::new(
+                [single]([double]$layoutBounds.Left + (([double]$layoutBounds.Width - $drawW) / 2.0)),
+                [single]([double]$layoutBounds.Top + (([double]$layoutBounds.Height - $drawH) / 2.0)),
+                [single]$drawW, [single]$drawH)
+            $oldInterpolation = $e.Graphics.InterpolationMode
+            $oldPixelOffset = $e.Graphics.PixelOffsetMode
+            $oldCompositing = $e.Graphics.CompositingQuality
+            if ($mirrorBrotherOutput) {
+                $state = $e.Graphics.Save()
+                try {
+                    # Keep module geometry stable instead of letting smoothing make the code look compressed.
+                    $e.Graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::NearestNeighbor
+                    $e.Graphics.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::Half
+                    $e.Graphics.CompositingQuality = [System.Drawing.Drawing2D.CompositingQuality]::HighQuality
+                    $e.Graphics.TranslateTransform([single]($drawRect.Left + $drawRect.Width), [single]$drawRect.Top)
+                    $e.Graphics.ScaleTransform(-1.0, 1.0)
+                    $e.Graphics.DrawImage($bmp, 0.0, 0.0, [single]$drawRect.Width, [single]$drawRect.Height)
+                } finally {
+                    $e.Graphics.Restore($state)
+                }
+            } else {
+                $e.Graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::NearestNeighbor
+                $e.Graphics.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::Half
+                $e.Graphics.CompositingQuality = [System.Drawing.Drawing2D.CompositingQuality]::HighQuality
+                $e.Graphics.DrawImage($bmp, $drawRect)
+            }
+            $e.Graphics.InterpolationMode = $oldInterpolation
+            $e.Graphics.PixelOffsetMode = $oldPixelOffset
+            $e.Graphics.CompositingQuality = $oldCompositing
             $script:_printLabelIndex++
             $e.HasMorePages = $script:_printLabelIndex -lt $script:_printLabelBitmaps.Count
         })
@@ -4273,7 +4872,7 @@ $btnRelBrowseCsv.Add_Click({
     if ($dlg.ShowDialog()) {
         $tbRelCsvPath.Text = $dlg.FileName
         try {
-            $script:RelationshipCsvData = Import-Csv -LiteralPath $dlg.FileName -Encoding UTF8
+            $script:RelationshipCsvData = @(Import-Csv -LiteralPath $dlg.FileName -Encoding UTF8 | ForEach-Object { $_ })
             if ($script:RelationshipCsvData -and $script:RelationshipCsvData.Count -gt 0) {
                 $dgRelCsvPreview.ItemsSource = $script:RelationshipCsvData
                 $lblStatus.Text = "Loaded $($script:RelationshipCsvData.Count) relationship row(s). Click Import relationships."
@@ -4380,106 +4979,190 @@ $btnRelRefreshTypes.Add_Click({
         $lblStatus.Text = "Could not load relationship types: $($_.Exception.Message)"
     }
     $btnRelRefreshTypes.IsEnabled = $true
-    Update-RelCreateUiState
+    Update-RelBuilderUiState
 })
 
-$cbRelType.Add_SelectionChanged({ Update-RelCreateUiState })
-
-$btnRelClearSource.Add_Click({
-    $script:RelSourceDevice = $null
-    Set-RelEndpointLabels -Device $null -IsSource $true
-    Update-RelCreateUiState
-    $tbRelScanInput.Focus()
+$dgRelRows.Add_SelectionChanged({
+    Update-RelBuilderUiState
 })
 
-$btnRelClearTarget.Add_Click({
-    $script:RelTargetDevice = $null
-    Set-RelEndpointLabels -Device $null -IsSource $false
-    Update-RelCreateUiState
-    $tbRelScanInput.Focus()
+$btnRelAddRow.Add_Click({
+    $script:RelationshipRows.Add((New-RelationshipBuilderRow)) | Out-Null
+    Refresh-RelationshipRowsGrid
+    $dgRelRows.Focus()
 })
 
-$tbRelScanInput.Add_KeyDown({
-    param($sender, $e)
-    if ($e.Key -ne 'Return') { return }
-    $e.Handled = $true
-    $raw = $tbRelScanInput.Text
-    $tbRelScanInput.Clear()
+$btnRelDuplicateRows.Add_Click({
+    $selected = @($dgRelRows.SelectedItems)
+    if ($selected.Count -eq 0) { return }
+    foreach ($row in $selected) {
+        $script:RelationshipRows.Add((New-RelationshipBuilderRow `
+                    -SourceType $row.SourceType `
+                    -SourceRef $row.SourceRef `
+                    -RelationshipTypeId ([int]$row.RelationshipTypeId) `
+                    -TargetType $row.TargetType `
+                    -TargetRef $row.TargetRef)) | Out-Null
+    }
+    Refresh-RelationshipRowsGrid
+})
 
-    if ([string]::IsNullOrWhiteSpace($raw)) { return }
-    if (-not (Test-SignedIn)) { return }
-
-    try {
-        $dev = Resolve-RelDeviceFromQrText -Text $raw
-        if ($rbRelScanSource.IsChecked -eq $true) {
-            $script:RelSourceDevice = $dev
-            Set-RelEndpointLabels -Device $dev -IsSource $true
-        } else {
-            $script:RelTargetDevice = $dev
-            Set-RelEndpointLabels -Device $dev -IsSource $false
+$btnRelRemoveRows.Add_Click({
+    $selected = @($dgRelRows.SelectedItems)
+    if ($selected.Count -eq 0) { return }
+    foreach ($row in $selected) {
+        [void]$script:RelationshipRows.Remove($row)
+        if ($script:RelCompletedRows.ContainsKey([int]$row.RowId)) {
+            $script:RelCompletedRows.Remove([int]$row.RowId)
         }
-        Update-RelCreateUiState
-        [System.Media.SystemSounds]::Asterisk.Play()
-    } catch {
-        $lblStatus.Text = $_.Exception.Message
+    }
+    Refresh-RelationshipRowsGrid
+})
+
+$btnRelValidateRows.Add_Click({
+    if (-not (Test-SignedIn)) { return }
+    if ($script:RelationshipRows.Count -eq 0) {
+        $lblStatus.Text = 'No rows to validate.'
+        return
+    }
+    $valid = @(Validate-RelationshipBuilderRows)
+    $invalid = $script:RelationshipRows.Count - $valid.Count
+    $lblStatus.Text = "Validation complete. Valid: $($valid.Count). Invalid: $invalid."
+})
+
+$btnRelCreateRows.Add_Click({
+    if (-not (Test-SignedIn)) { return }
+    if ($script:RelationshipRows.Count -eq 0) {
+        $lblStatus.Text = 'No relationship rows to create.'
+        return
+    }
+    $validated = @(Validate-RelationshipBuilderRows)
+    if ($validated.Count -eq 0) {
+        $lblStatus.Text = 'No valid rows to submit.'
         [System.Media.SystemSounds]::Hand.Play()
+        return
     }
-
-    $tbRelScanInput.Focus()
-})
-
-$btnRelCreateRelationship.Add_Click({
-    if (-not (Test-SignedIn)) { return }
-    if ($null -eq $script:RelSourceDevice -or $null -eq $script:RelTargetDevice) { return }
-    $sel = $cbRelType.SelectedItem
-    if ($null -eq $sel) { return }
-
-    $typeId = [int]$sel.Id
-    $req = @{
-        sourceId             = $script:RelSourceDevice.Id
-        sourceType           = 'DEVICE'
-        targetId             = $script:RelTargetDevice.Id
-        targetType           = 'DEVICE'
-        relationshipTypeId   = $typeId
-    }
-
-    $btnRelCreateRelationship.IsEnabled = $false
+    $requests = @($validated | ForEach-Object { $_.Request })
+    $btnRelCreateRows.IsEnabled = $false
+    $lblStatus.Text = "Creating $($requests.Count) relationship(s)..."
+    Push-UIUpdate
     try {
-        $resp = Invoke-CreateAssetRelationships -Requests @($req)
+        $resp = Invoke-CreateAssetRelationships -Requests $requests
         $sum = Get-AssetRelationshipCreateSummary -Resp $resp
-        if ($sum.Created -gt 0 -and $sum.ErrorLines.Count -eq 0) {
-            $lblStatus.Text = 'Relationship created successfully.'
-            [System.Media.SystemSounds]::Asterisk.Play()
-        } elseif ($sum.Created -gt 0 -and $sum.ErrorLines.Count -gt 0) {
-            $lblStatus.Text = "Partial success: $($sum.Created) created; see dialog for errors."
-            [System.Windows.MessageBox]::Show(
-                ($sum.ErrorLines -join "`r`n"), 'Relationship create', 'OK', 'Warning') | Out-Null
+        foreach ($entry in $validated) {
+            $entry.Row.Status = 'Created'
+            $entry.Row.Validation = "Created: $(Get-RelationshipTypeDisplay -TypeId ([int]$entry.Row.RelationshipTypeId))"
+            $script:RelCompletedRows[[int]$entry.Row.RowId] = $true
+        }
+        if ($sum.ErrorLines.Count -gt 0) {
+            foreach ($line in $sum.ErrorLines) {
+                if ($line -match '^Request\s+(\d+):') {
+                    $idx = [int]$Matches[1] - 1
+                    if ($idx -ge 0 -and $idx -lt $validated.Count) {
+                        $failedRow = $validated[$idx].Row
+                        $failedRow.Status = 'API error'
+                        $failedRow.Validation = $line
+                        if ($script:RelCompletedRows.ContainsKey([int]$failedRow.RowId)) {
+                            $script:RelCompletedRows.Remove([int]$failedRow.RowId)
+                        }
+                    }
+                }
+            }
+            $lblStatus.Text = "Partial success: $($sum.Created) created; $($sum.ErrorLines.Count) API error(s)."
+            [System.Windows.MessageBox]::Show(($sum.ErrorLines -join "`r`n"), 'Relationship create', 'OK', 'Warning') | Out-Null
         } else {
-            $detail = if ($sum.ErrorLines.Count -gt 0) { $sum.ErrorLines -join "`r`n" } else { 'No success entries returned.' }
-            $lblStatus.Text = 'Relationship was not created.'
-            [System.Windows.MessageBox]::Show(
-                $detail, 'Relationship create', 'OK', 'Warning') | Out-Null
+            $lblStatus.Text = "Relationships created: $($sum.Created)."
+            [System.Media.SystemSounds]::Asterisk.Play()
         }
     } catch {
-        $lblStatus.Text = "Create failed: $($_.Exception.Message)"
+        $lblStatus.Text = "Relationship create failed: $($_.Exception.Message)"
         [System.Windows.MessageBox]::Show(
             $_.Exception.Message, 'Relationship create', 'OK', 'Error') | Out-Null
     }
-    $btnRelCreateRelationship.IsEnabled = $true
-    Update-RelCreateUiState
-    $tbRelScanInput.Focus()
+    $btnRelCreateRows.IsEnabled = $true
+    Refresh-RelationshipRowsGrid
+})
+
+$btnRelClearCompleted.Add_Click({
+    $remaining = [System.Collections.Generic.List[PSCustomObject]]::new()
+    foreach ($row in @($script:RelationshipRows)) {
+        if ($script:RelCompletedRows.ContainsKey([int]$row.RowId)) { continue }
+        $remaining.Add($row) | Out-Null
+    }
+    $script:RelationshipRows = $remaining
+    $script:RelCompletedRows = @{}
+    Refresh-RelationshipRowsGrid
+})
+
+$cbRelPreUser.Add_DropDownOpened({
+    if (-not (Test-SignedIn)) { return }
+    try {
+        $cbRelPreUser.ItemsSource = @(Get-ScanUserMatches -SearchText $cbRelPreUser.Text -MaxResults 100)
+    } catch {
+        $lblStatus.Text = "Could not load users: $($_.Exception.Message)"
+    }
+})
+
+$cbRelPreUser.Add_KeyUp({
+    if ($cbRelPreUser.Text.Length -lt 2) { return }
+    try {
+        $cbRelPreUser.ItemsSource = @(Get-ScanUserMatches -SearchText $cbRelPreUser.Text -MaxResults 100)
+        $cbRelPreUser.IsDropDownOpen = ($cbRelPreUser.Items.Count -gt 0)
+    } catch { Write-Verbose "Relationship pre-user filter failed: $($_.Exception.Message)" }
+})
+
+$btnRelPreloadForUser.Add_Click({
+    if (-not (Test-SignedIn)) { return }
+    $user = $cbRelPreUser.SelectedItem
+    if ($null -eq $user) { $user = Try-ResolveRelationshipPreUser -InputText $cbRelPreUser.Text }
+    if ($null -eq $user) {
+        $lblStatus.Text = 'Select a user before pre-populating.'
+        [System.Media.SystemSounds]::Hand.Play()
+        return
+    }
+    $uid = ConvertTo-ScalarString -Value $user.Uid
+    if (-not $uid) { $uid = [string]$user.Id }
+    $lblStatus.Text = "Loading assigned devices for $($user.Name) (fast pass)..."
+    Push-UIUpdate
+    $lookup = Get-DevicesAssignedToUser -UserUid $uid -UserId ([int]$user.Id) -UserEmail ([string]$user.Email)
+    $devices = @($lookup.Devices)
+    if ($lookup.UsedFallback) {
+        $lblStatus.Text = "Fast pass found no assigned devices across $($lookup.SeedCount) device(s); deep lookup complete."
+        Push-UIUpdate
+    }
+    if ($devices.Count -eq 0) {
+        $lblStatus.Text = "No assigned devices found for $($user.Name)."
+        [System.Media.SystemSounds]::Hand.Play()
+        return
+    }
+    foreach ($d in $devices) {
+        $leftType = [string]$cbRelTemplateSourceType.SelectedValue
+        $rightType = [string]$cbRelTemplateTargetType.SelectedValue
+        $leftValue = $tbRelTemplateSourceValue.Text.Trim()
+        $rightValue = $tbRelTemplateTargetValue.Text.Trim()
+        if ($leftType -eq 'USER' -and [string]::IsNullOrWhiteSpace($leftValue)) { $leftValue = [string]$user.Id }
+        if ($rightType -eq 'USER' -and [string]::IsNullOrWhiteSpace($rightValue)) { $rightValue = [string]$user.Id }
+        if ($leftType -eq 'DEVICE') { $leftValue = [string]$d.Id }
+        if ($rightType -eq 'DEVICE') { $rightValue = [string]$d.Id }
+        $script:RelationshipRows.Add((New-RelationshipBuilderRow -SourceType $leftType -SourceRef $leftValue -TargetType $rightType -TargetRef $rightValue)) | Out-Null
+    }
+    if ($lookup.UsedFallback) {
+        $lblStatus.Text = "Added $($devices.Count) row(s) from devices assigned to $($user.Name) using deep lookup."
+    } else {
+        $lblStatus.Text = "Added $($devices.Count) row(s) from devices assigned to $($user.Name)."
+    }
+    Refresh-RelationshipRowsGrid
 })
 
 $tcRelationships.Add_SelectionChanged({
-    if ($tcRelationships.SelectedItem -eq $tabRelCreateInner) {
-        if ((Test-TokenValid -or (Test-RefreshTokenPresent)) -and $cbRelType.Items.Count -eq 0) {
+    if ($tcRelationships.SelectedItem -eq $tabRelBuilderInner) {
+        if ((Test-TokenValid -or (Test-RefreshTokenPresent)) -and $cbRelTemplateType.Items.Count -eq 0) {
             try {
                 Refresh-RelationshipTypeCombo
             } catch {
                 $lblStatus.Text = "Could not load relationship types: $($_.Exception.Message)"
             }
         }
-        Update-RelCreateUiState
+        Update-RelBuilderUiState
     }
 })
 #endregion
@@ -4511,13 +5194,13 @@ $tabControl.Add_SelectionChanged({
     elseif ($tab -eq $tabRelationships) {
         if (Test-TokenValid -or (Test-RefreshTokenPresent)) {
             try {
-                if ($cbRelType.Items.Count -eq 0) {
+                if ($cbRelTemplateType.Items.Count -eq 0) {
                     Refresh-RelationshipTypeCombo
                 }
             } catch {
                 $lblStatus.Text = "Could not load relationship types: $($_.Exception.Message)"
             }
-            $tbRelScanInput.Focus()
+            $dgRelRows.Focus()
         }
     }
 })
@@ -4535,7 +5218,7 @@ $window.Add_Activated({
         -and -not $expSettings.IsExpanded) {
         $tab = $tabControl.SelectedItem
         if ($tab -eq $tabScan) { $tbScanInput.Focus() }
-        elseif ($tab -eq $tabRelationships) { $tbRelScanInput.Focus() }
+        elseif ($tab -eq $tabRelationships) { $dgRelRows.Focus() }
     }
 })
 
