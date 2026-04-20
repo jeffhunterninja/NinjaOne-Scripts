@@ -2,7 +2,7 @@
 
 This script enumerates attached peripherals on a Windows device (keyboards, mice, monitors, USB devices, cameras, etc.) and writes a detailed HTML table to a NinjaOne device custom field. When the field is a **WYSIWYG** (Rich text) type, the table renders in the NinjaOne UI.
 
-The default output now includes six columns — **Device Name**, **Type**, **Manufacturer**, **Connection**, **Status**, and **Hardware ID** — with bus-reported product names (the real name a device advertises, e.g. "SanDisk Ultra USB 3.0" instead of "USB Mass Storage Device") and automatic filtering of virtual/infrastructure devices.
+The default output now includes eight columns — **Device Name**, **Type**, **Manufacturer**, **Connection**, **Status**, **Hardware ID**, **Serial Number**, and **Serial Source** — with bus-reported product names (the real name a device advertises, e.g. "SanDisk Ultra USB 3.0" instead of "USB Mass Storage Device") and automatic filtering of virtual/infrastructure devices.
 
 ## Prerequisites
 
@@ -65,6 +65,25 @@ The default output now includes six columns — **Device Name**, **Type**, **Man
 | **Connection** | Parsed from the `InstanceId` prefix (USB, PCI, Bluetooth, HD Audio, HID, etc.). |
 | **Status** | PnP device status (filtered to `OK` by default). |
 | **Hardware ID** | Short hardware identifier — `VID_xxxx&PID_xxxx` for USB devices, or the second segment of the first hardware ID. |
+| **Serial Number** | Best-effort per-device serial when Windows exposes one. |
+| **Serial Source** | Where serial came from: `WmiMonitorID`, `InstanceId`, or `None`. |
+
+## Serial number discovery
+
+Serial collection is **best effort** and hardware/driver dependent. The script keeps `Hardware ID` as a fallback identifier even when serial is missing.
+
+Serial precedence:
+
+1. **Monitor serial from `root\wmi:WmiMonitorID`** (highest confidence)
+2. **USB instance-derived serial** from `InstanceId` (`USB\VID_xxxx&PID_yyyy\<serial>`)
+3. **No serial** when neither source is usable
+
+Notes and caveats:
+
+- Some monitors do not expose a usable EDID serial through `WmiMonitorID`.
+- Some docks enumerate as multiple child devices; serial may represent a child function rather than the whole dock.
+- USB re-enumeration and generic hub/function nodes can yield unstable or missing instance-derived serials.
+- Placeholder serials (all zeros, repeated characters, etc.) are filtered out.
 
 ## Filtered devices
 

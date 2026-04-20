@@ -42,7 +42,7 @@
 
 .EXAMPLE
     .\Report-AttachedPeripherals.ps1 -NoNinjaWrite
-    Enumerates peripherals with full detail (Device Name, Type, Manufacturer, Connection, Status, Hardware ID).
+    Enumerates peripherals with full detail (Device Name, Type, Manufacturer, Connection, Status, Hardware ID, Serial Number, Serial Source).
 .EXAMPLE
     .\Report-AttachedPeripherals.ps1 -NoNinjaWrite -IncludeVirtualDevices
     Includes virtual adapters, WAN miniports, root hubs, host controllers, etc.
@@ -152,6 +152,77 @@ function Get-ShortHardwareId {
     return $HardwareIDs[0]
 }
 
+function Convert-ByteArrayToAsciiString {
+    param([byte[]]$Bytes)
+    if ($null -eq $Bytes -or $Bytes.Count -eq 0) { return '' }
+    $chars = foreach ($b in $Bytes) {
+        if ($b -gt 0) { [char]$b }
+    }
+    return ((-join $chars).Trim())
+}
+
+function Test-UsableSerial {
+    param([string]$Serial)
+    if ([string]::IsNullOrWhiteSpace($Serial)) { return $false }
+    $value = $Serial.Trim()
+    if ($value.Length -lt 4) { return $false }
+    if ($value -match '^(0+|1+|9+|F+|X+)$') { return $false }
+    if ($value -match '^(1234|12345|123456|1234567|12345678|123456789)$') { return $false }
+    if ($value -match '^(.)\1{5,}$') { return $false }
+    return $true
+}
+
+function Get-UsbSerialFromInstanceId {
+    param([string]$InstanceId)
+    if ([string]::IsNullOrWhiteSpace($InstanceId)) { return '' }
+    if ($InstanceId -notmatch '^USB\\') { return '' }
+    $parts = $InstanceId -split '\\'
+    if ($parts.Count -lt 3) { return '' }
+    $candidate = ($parts[2]).Trim()
+    if ([string]::IsNullOrWhiteSpace($candidate)) { return '' }
+    if ($candidate -match '^MI_\d{2}$') { return '' }
+    if ($candidate -match '^&') { return '' }
+    return $candidate
+}
+
+function Get-MonitorSerialMap {
+    $map = @{}
+    try {
+        $monitorIds = Get-CimInstance -Namespace root\wmi -ClassName WmiMonitorID -ErrorAction Stop
+        foreach ($monitor in $monitorIds) {
+            $serial = Convert-ByteArrayToAsciiString -Bytes $monitor.SerialNumberID
+            if (-not (Test-UsableSerial -Serial $serial)) { continue }
+            $instanceKey = [string]$monitor.InstanceName
+            if ([string]::IsNullOrWhiteSpace($instanceKey)) { continue }
+            $instanceKey = $instanceKey -replace '_\d+$', ''
+            $instanceKey = $instanceKey.ToUpperInvariant()
+            if (-not $map.ContainsKey($instanceKey)) {
+                $map[$instanceKey] = $serial
+            }
+        }
+    } catch {
+        Write-Verbose "WmiMonitorID query failed: $($_.Exception.Message)"
+    }
+    return $map
+}
+
+function Get-MonitorSerialFromInstanceId {
+    param(
+        [string]$InstanceId,
+        [hashtable]$MonitorSerialMap
+    )
+    if ([string]::IsNullOrWhiteSpace($InstanceId)) { return '' }
+    if ($null -eq $MonitorSerialMap -or $MonitorSerialMap.Count -eq 0) { return '' }
+    $instanceUpper = $InstanceId.ToUpperInvariant()
+    if ($MonitorSerialMap.ContainsKey($instanceUpper)) { return $MonitorSerialMap[$instanceUpper] }
+    foreach ($k in $MonitorSerialMap.Keys) {
+        if ($instanceUpper.StartsWith($k) -or $k.StartsWith($instanceUpper)) {
+            return $MonitorSerialMap[$k]
+        }
+    }
+    return ''
+}
+
 $classesToInclude = if ($IncludeClasses.Count -gt 0) { $IncludeClasses } else { $DefaultIncludeClasses }
 
 try {
@@ -196,6 +267,7 @@ if ($Simple) {
     }
 
     $busReportedNames = @{}
+    $monitorSerialMap = Get-MonitorSerialMap
     foreach ($dev in $filteredDevices) {
         try {
             $prop = Get-PnpDeviceProperty -InstanceId $dev.InstanceId `
@@ -224,6 +296,26 @@ if ($Simple) {
         $type       = if ($ClassDisplayNames.ContainsKey($cls)) { $ClassDisplayNames[$cls] } else { $cls }
         $connection = Get-ConnectionType -InstanceId $_.InstanceId
         $hardwareId = Get-ShortHardwareId -HardwareIDs $hwIds
+        $discoveredSerial = ''
+        $serialSource = 'None'
+        $serialConfidence = 'None'
+
+        if ($cls -in @('Monitor', 'Display')) {
+            $monitorSerial = Get-MonitorSerialFromInstanceId -InstanceId $_.InstanceId -MonitorSerialMap $monitorSerialMap
+            if (Test-UsableSerial -Serial $monitorSerial) {
+                $discoveredSerial = $monitorSerial
+                $serialSource = 'WmiMonitorID'
+                $serialConfidence = 'High'
+            }
+        }
+        if (-not $discoveredSerial) {
+            $usbSerial = Get-UsbSerialFromInstanceId -InstanceId $_.InstanceId
+            if (Test-UsableSerial -Serial $usbSerial) {
+                $discoveredSerial = $usbSerial
+                $serialSource = 'InstanceId'
+                $serialConfidence = 'Medium'
+            }
+        }
 
         [PSCustomObject]@{
             DeviceName   = $deviceName
@@ -232,6 +324,9 @@ if ($Simple) {
             Connection   = $connection
             Status       = $_.Status
             HardwareId   = $hardwareId
+            SerialNumber = $discoveredSerial
+            SerialSource = $serialSource
+            SerialConfidence = $serialConfidence
         }
     } | Sort-Object -Property Type, DeviceName
 }
@@ -242,7 +337,7 @@ if ($applyMax -and $rows.Count -gt $MaxRows) {
     $rows = $rows[0..($MaxRows - 1)]
 }
 
-$colCount  = if ($Simple) { 3 } else { 6 }
+$colCount  = if ($Simple) { 3 } else { 8 }
 $cellStyle = 'border: 1px solid #ccc; padding: 4px 8px;'
 $thStyle   = 'border: 1px solid #ccc; padding: 6px 8px; text-align: left;'
 
@@ -261,6 +356,8 @@ if ($Simple) {
     $null = $sb.AppendLine("      <th style=`"$thStyle`">Connection</th>")
     $null = $sb.AppendLine("      <th style=`"$thStyle`">Status</th>")
     $null = $sb.AppendLine("      <th style=`"$thStyle`">Hardware ID</th>")
+    $null = $sb.AppendLine("      <th style=`"$thStyle`">Serial Number</th>")
+    $null = $sb.AppendLine("      <th style=`"$thStyle`">Serial Source</th>")
 }
 $null = $sb.AppendLine('    </tr>')
 $null = $sb.AppendLine('  </thead>')
@@ -282,7 +379,9 @@ if ($rows.Count -eq 0) {
             $cn  = Escape-HtmlFragment -Text $row.Connection
             $st  = Escape-HtmlFragment -Text $row.Status
             $hid = Escape-HtmlFragment -Text $row.HardwareId
-            $null = $sb.AppendLine("    <tr><td style=`"$cellStyle`">$dn</td><td style=`"$cellStyle`">$tp</td><td style=`"$cellStyle`">$mfr</td><td style=`"$cellStyle`">$cn</td><td style=`"$cellStyle`">$st</td><td style=`"$cellStyle`">$hid</td></tr>")
+            $srn = Escape-HtmlFragment -Text $row.SerialNumber
+            $srs = Escape-HtmlFragment -Text $row.SerialSource
+            $null = $sb.AppendLine("    <tr><td style=`"$cellStyle`">$dn</td><td style=`"$cellStyle`">$tp</td><td style=`"$cellStyle`">$mfr</td><td style=`"$cellStyle`">$cn</td><td style=`"$cellStyle`">$st</td><td style=`"$cellStyle`">$hid</td><td style=`"$cellStyle`">$srn</td><td style=`"$cellStyle`">$srs</td></tr>")
         }
     }
     if ($applyMax -and @($peripherals).Count -gt $MaxRows) {
