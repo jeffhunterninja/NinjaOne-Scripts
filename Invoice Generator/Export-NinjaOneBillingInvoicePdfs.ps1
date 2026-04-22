@@ -1,11 +1,18 @@
 <#
 .SYNOPSIS
-    Exports NinjaOne billing invoices for a given month as PDF files.
+    Exports NinjaOne billing invoices for a given month as HTML files.
 
 .DESCRIPTION
     Authenticates to the NinjaOne API via OAuth2 client credentials, retrieves billing
     invoices for the specified month, fetches full invoice details including all line items,
-    renders each as a styled HTML document, then converts to PDF using headless Chrome or Edge.
+    and renders each as a styled UTF-8 HTML document under -OutputPath.
+
+    After a successful run, writes NinjaBillingInvoiceExport-manifest.json in -OutputPath
+    listing each exported invoice (invoice id, organization client id, paths) for use with
+    New-NinjaOneBillingInvoiceTickets.ps1, which uses a refresh token for PSA ticketing.
+
+    Testing: run with -WhatIf to skip disk and manifest; zero invoices exits 0.
+
     No third-party PowerShell modules required.
 
 .PARAMETER NinjaOneInstance
@@ -24,7 +31,7 @@
     Year for the billing period. Defaults to current year.
 
 .PARAMETER OutputPath
-    Folder where PDF invoices will be saved. Created if it does not exist.
+    Folder where HTML invoices will be saved. Created if it does not exist.
 
 .PARAMETER ClientId
     Optional. Filter invoices to a specific NinjaOne organization/client ID.
@@ -63,6 +70,8 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Web
+
+$ManifestFileName = 'NinjaBillingInvoiceExport-manifest.json'
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
 
@@ -373,44 +382,6 @@ $notesHtml
     return $html
 }
 
-# ── PDF conversion via headless Chrome/Edge ───────────────────────────────────
-
-function ConvertTo-Pdf {
-    param([string]$HtmlPath, [string]$PdfPath)
-
-    $candidates = @(
-        'chrome.exe',
-        'msedge.exe',
-        "$env:ProgramFiles\Google\Chrome\Application\chrome.exe",
-        "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe",
-        "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe",
-        "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe",
-        "$env:LocalAppData\Google\Chrome\Application\chrome.exe"
-    )
-
-    $browser = $null
-    foreach ($candidate in $candidates) {
-        $found = Get-Command $candidate -ErrorAction SilentlyContinue
-        if ($found) { $browser = $found.Source; break }
-        if (Test-Path $candidate -ErrorAction SilentlyContinue) { $browser = $candidate; break }
-    }
-
-    if (-not $browser) {
-        throw "Chrome or Edge not found. Install either browser or add its executable to PATH, then retry."
-    }
-
-    $absPdfPath = [System.IO.Path]::GetFullPath($PdfPath)
-    $fileUri = 'file:///' + $HtmlPath.Replace('\', '/').TrimStart('/')
-    & $browser --headless=new "--print-to-pdf=$absPdfPath" --no-margins --disable-gpu --no-pdf-header-footer "$fileUri" 2>$null
-
-    if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {
-        throw "Browser process exited with code $LASTEXITCODE while converting '$HtmlPath'."
-    }
-    if (-not (Test-Path $absPdfPath)) {
-        throw "PDF was not created at '$absPdfPath'. Verify the browser supports headless PDF printing."
-    }
-}
-
 # ── Validation ────────────────────────────────────────────────────────────────
 
 if ([string]::IsNullOrWhiteSpace($NinjaOneInstance))     { throw "NinjaOne instance is required. Set NINJAONE_INSTANCE or pass -NinjaOneInstance." }
@@ -461,29 +432,40 @@ $succeeded = 0
 $failed    = 0
 $skipped   = 0
 $errors    = [System.Collections.Generic.List[string]]::new()
+$manifestRows = [System.Collections.Generic.List[hashtable]]::new()
 
 foreach ($inv in $invoiceList) {
-    $invNum     = if ($inv.invoiceNumber) { $inv.invoiceNumber } else { "INV-$($inv.id)" }
-    $clientName = if ($inv.client -and $inv.client.name) {
-                      $inv.client.name -replace '[\\/:*?"<>|]', '_'
-                  } else { 'Unknown' }
-    $safeNum    = $invNum -replace '[\\/:*?"<>|]', '_'
-    $pdfName    = "${safeNum}_${clientName}.pdf"
-    $pdfPath    = Join-Path $OutputPath $pdfName
+    $invNum = if ($inv.invoiceNumber) { $inv.invoiceNumber } else { "INV-$($inv.id)" }
+    $displayClient = if ($inv.client -and $inv.client.name) { $inv.client.name } else { 'Unknown' }
+    $clientName    = $displayClient -replace '[\\/:*?"<>|]', '_'
+    $safeNum       = $invNum -replace '[\\/:*?"<>|]', '_'
+    $htmlName      = "${safeNum}_${clientName}.html"
+    $htmlPath      = Join-Path $OutputPath $htmlName
 
-    if ($PSCmdlet.ShouldProcess($pdfPath, "Generate invoice PDF for $invNum ($clientName)")) {
+    $shouldDesc = "Generate invoice HTML for $invNum ($displayClient)"
+
+    if ($PSCmdlet.ShouldProcess($htmlPath, $shouldDesc)) {
         try {
-            Write-Host "  [$invNum] $clientName..." -NoNewline
+            Write-Host "  [$invNum] $displayClient..." -NoNewline
 
             $detail      = Invoke-NinjaApi -Endpoint "/v2/billing/invoices/$($inv.id)" -Session $session
             $htmlContent = Build-InvoiceHtml -Invoice $detail
-            $tmpHtml     = Join-Path $env:TEMP "ninja_invoice_$($inv.id)_$([System.IO.Path]::GetRandomFileName()).html"
+            [System.IO.File]::WriteAllText($htmlPath, $htmlContent, [System.Text.Encoding]::UTF8)
 
-            [System.IO.File]::WriteAllText($tmpHtml, $htmlContent, [System.Text.Encoding]::UTF8)
-            ConvertTo-Pdf -HtmlPath $tmpHtml -PdfPath $pdfPath
-            Remove-Item $tmpHtml -Force -ErrorAction SilentlyContinue
+            $orgId = if ($detail.client -and $null -ne $detail.client.id) { [int]$detail.client.id } else { $null }
+            if ($null -ne $orgId) {
+                [void]$manifestRows.Add(@{
+                    invoiceId              = [int]$inv.id
+                    clientOrganizationId   = $orgId
+                    invoiceNumber          = $invNum
+                    clientName             = $displayClient
+                    htmlFileName           = $htmlName
+                })
+            } else {
+                Write-Warning "[$invNum] Invoice has no client.id (organization); omitted from manifest (HTML still saved)."
+            }
 
-            Write-Host " $pdfName"
+            Write-Host " $htmlName"
             $succeeded++
         } catch {
             Write-Host " FAILED"
@@ -497,14 +479,30 @@ foreach ($inv in $invoiceList) {
     }
 }
 
+if (-not $WhatIfPreference -and $succeeded -gt 0) {
+    $manifestPath = Join-Path $OutputPath $ManifestFileName
+    $rows = @($manifestRows | ForEach-Object { [PSCustomObject]$_ })
+    if ($rows.Count -eq 0) {
+        $json = '[]'
+    } elseif ($rows.Count -eq 1) {
+        $json = '[' + (ConvertTo-Json -InputObject $rows[0] -Depth 5 -Compress) + ']'
+    } else {
+        $json = ConvertTo-Json -InputObject $rows -Depth 5
+    }
+    [System.IO.File]::WriteAllText($manifestPath, $json, [System.Text.Encoding]::UTF8)
+}
+
 Write-Host ''
 Write-Host ('─' * 50)
-Write-Host "  Succeeded : $succeeded"
+Write-Host "  Succeeded : $succeeded (HTML files)"
 if ($failed  -gt 0) { Write-Host "  Failed    : $failed" }
 if ($skipped -gt 0) { Write-Host "  Skipped   : $skipped (WhatIf)" }
 if ($succeeded -gt 0) {
     $resolved = Resolve-Path $OutputPath -ErrorAction SilentlyContinue
     Write-Host "  Output    : $resolved"
+    if (-not $WhatIfPreference) {
+        Write-Host "  Manifest  : $(Join-Path $resolved $ManifestFileName)"
+    }
 }
 Write-Host ('─' * 50)
 
