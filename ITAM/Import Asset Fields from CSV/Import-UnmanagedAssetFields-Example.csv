@@ -1,0 +1,5 @@
+Id,Name,AssetId,AssetStatus,SerialNumber,PurchaseDate,PurchaseAmount,ExpectedLifetime,EndOfLifeDate
+12345,Logitech MX Master 3,ASSET-MX-001,In use,ABC123456,2025-01-15,99,3 years,2028-01-15
+12346,Dell KB522 Wired,ASSET-KB-002,inventory,,2025-01-10,45,2 years,
+12347,Dell P2422H,,Provisioning,SN-MON-001,,,,,
+12348,CalDigit TS4,ASSET-DOCK-004,In use,,2025-01-05,399,3 years,2028-01-05
